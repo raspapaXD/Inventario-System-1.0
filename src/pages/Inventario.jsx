@@ -1,7 +1,7 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, useMemo } from "react";
 import { db } from "../../firebase";
 import {
-  collection, getDocs, addDoc, deleteDoc, doc, updateDoc,
+  collection, getDocs, addDoc, deleteDoc, doc, updateDoc, getDoc,
   query, orderBy, startAt, endAt
 } from "firebase/firestore";
 import { Link } from "react-router-dom";
@@ -21,29 +21,80 @@ function useTheme() {
 function Inventario() {
   const { theme, toggle } = useTheme();
 
+  // ---------- Estado principal ----------
   const [productos, setProductos] = useState([]);
   const [nuevoProducto, setNuevoProducto] = useState({
-    nombre: "", cantidad: "", minimo: "", imagen: null, precio: ""
+    nombre: "", cantidad: "", minimo: "", imagen: null, precio: "",
+    categoriaId: ""   // "" = sin categoría
   });
   const [editandoId, setEditandoId] = useState(null);
 
+  // Buscador
   const [busqueda, setBusqueda] = useState("");
   const [debounced, setDebounced] = useState("");
   const [cargando, setCargando] = useState(false);
   const [error, setError] = useState(null);
   const [soloAlertas, setSoloAlertas] = useState(false);
 
+  // Categorías
+  const [categorias, setCategorias] = useState([]);
+  const [filtroCategoria, setFiltroCategoria] = useState("ALL"); // ALL | NONE | <categoriaId>
+  const [agrupar, setAgrupar] = useState(false);
+
+  // Modal: nueva categoría
+  const [modalCategoria, setModalCategoria] = useState({ open: false, nombre: "" });
+
+  // Empresa (logo/nombre/NIT)
+  const [empresa, setEmpresa] = useState(null);
+
+  // Imagenes / upload
   const inputCamaraRef = useRef(null);
   const inputGaleriaRef = useRef(null);
   const [preview, setPreview] = useState(null);
   const objectUrlRef = useRef(null);
-
   const [subiendo, setSubiendo] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
 
-  useEffect(() => { const id = setTimeout(() => setDebounced(busqueda), 300); return () => clearTimeout(id); }, [busqueda]);
-  useEffect(() => () => { if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = null; } }, []);
+  // Confirmación de eliminación
+  const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, nombre: "" });
 
+  // ---------- Efectos ----------
+  // Debounce buscador
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced(busqueda), 300);
+    return () => clearTimeout(id);
+  }, [busqueda]);
+
+  // Limpieza de objectURL del preview
+  useEffect(() => {
+    return () => {
+      if (objectUrlRef.current) {
+        URL.revokeObjectURL(objectUrlRef.current);
+        objectUrlRef.current = null;
+      }
+    };
+  }, []);
+
+  // Cargar empresa
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, "empresas", "empresa"));
+        if (snap.exists()) setEmpresa(snap.data());
+      } catch {}
+    })();
+  }, []);
+
+  // Cargar categorías
+  const cargarCategorias = async () => {
+    const snap = await getDocs(collection(db, "categorias"));
+    const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+    lista.sort((a,b) => (a.nombre || "").localeCompare(b.nombre || ""));
+    setCategorias(lista);
+  };
+  useEffect(() => { cargarCategorias(); }, []);
+
+  // Cargar productos
   const obtenerProductos = async () => {
     const snapshot = await getDocs(collection(db, "productos"));
     setProductos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
@@ -51,18 +102,32 @@ function Inventario() {
   const buscarPorPrefijo = async (texto) => {
     const t = (texto || "").trim().toLowerCase();
     if (!t) return [];
-    const qy = query(collection(db, "productos"), orderBy("nombreLower"), startAt(t), endAt(t + "\uf8ff"));
+    const qy = query(
+      collection(db, "productos"),
+      orderBy("nombreLower"),
+      startAt(t),
+      endAt(t + "\uf8ff")
+    );
     const snap = await getDocs(qy);
     return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   };
+  useEffect(()=>{ setCargando(true); obtenerProductos().finally(()=>setCargando(false)); },[]);
+  useEffect(()=>{ (async()=>{ setCargando(true); setError(null);
+    try { debounced.trim() ? setProductos(await buscarPorPrefijo(debounced)) : await obtenerProductos(); }
+    catch(e){ console.error(e); setError("No se pudieron cargar los productos."); }
+    finally{ setCargando(false); }
+  })(); },[debounced]);
 
+  // ---------- Handlers de formulario ----------
   const handleChange = (e) => setNuevoProducto({ ...nuevoProducto, [e.target.name]: e.target.value });
+
   const handleFileChange = (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = null; }
     const url = URL.createObjectURL(file); objectUrlRef.current = url; setPreview(url);
     setNuevoProducto({ ...nuevoProducto, imagen: file });
   };
+
   const quitarImagen = () => {
     if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = null; }
     setPreview(null); setNuevoProducto({ ...nuevoProducto, imagen: null });
@@ -70,6 +135,7 @@ function Inventario() {
     if (inputGaleriaRef.current) inputGaleriaRef.current.value = "";
   };
 
+  // ---------- Utilidades imagen ----------
   function dataURLtoFile(dataUrl, filename) {
     const arr = dataUrl.split(","), mime = arr[0].match(/:(.*?);/)[1], bstr = atob(arr[1]);
     let n = bstr.length; const u8 = new Uint8Array(n); while(n--) u8[n] = bstr.charCodeAt(n);
@@ -97,6 +163,7 @@ function Inventario() {
     });
   }
 
+  // ---------- Guardar producto ----------
   const agregarOActualizarProducto = async () => {
     try {
       setError(null);
@@ -111,20 +178,29 @@ function Inventario() {
         urlImagen = nuevoProducto.imagen;
       }
 
+      const cat = categorias.find(c => c.id === nuevoProducto.categoriaId);
+      const categoriaNombre = cat?.nombre || null;
+
       const productoData = {
         nombre: nuevoProducto.nombre,
         nombreLower: (nuevoProducto.nombre || "").trim().toLowerCase(),
         cantidad: parseInt(nuevoProducto.cantidad),
         minimo: parseInt(nuevoProducto.minimo),
         imagen: urlImagen || null,
-        precioUnitario: parseFloat(nuevoProducto.precio)
+        precioUnitario: parseFloat(nuevoProducto.precio),
+        categoriaId: nuevoProducto.categoriaId || "",
+        categoriaNombre: categoriaNombre || null
       };
 
-      if (editandoId) { await updateDoc(doc(db,"productos",editandoId), productoData); setEditandoId(null); }
-      else { await addDoc(collection(db,"productos"), productoData); }
+      if (editandoId) {
+        await updateDoc(doc(db,"productos",editandoId), productoData);
+        setEditandoId(null);
+      } else {
+        await addDoc(collection(db,"productos"), productoData);
+      }
 
       quitarImagen();
-      setNuevoProducto({ nombre:"", cantidad:"", minimo:"", imagen:null, precio:"" });
+      setNuevoProducto({ nombre:"", cantidad:"", minimo:"", imagen:null, precio:"", categoriaId:"" });
       setUploadProgress(0); setSubiendo(false);
 
       if (debounced.trim()) setProductos(await buscarPorPrefijo(debounced));
@@ -134,53 +210,134 @@ function Inventario() {
     }
   };
 
-  const eliminarProducto = async (id) => {
+  // ---------- Eliminar producto (con modal) ----------
+  const ejecutarEliminarProducto = async (id) => {
     try {
       setError(null);
       await deleteDoc(doc(db,"productos",id));
+      setConfirmDelete({ open: false, id: null, nombre: "" });
       if (debounced.trim()) setProductos(await buscarPorPrefijo(debounced));
       else await obtenerProductos();
     } catch (err) { console.error(err); setError("No se pudo eliminar el producto."); }
   };
 
+  const solicitarEliminar = (id, nombre) => setConfirmDelete({ open: true, id, nombre });
+  const cancelarEliminar = () => setConfirmDelete({ open: false, id: null, nombre: "" });
+  const eliminarProducto = (id) => {
+    const p = productos.find(x => x.id === id);
+    solicitarEliminar(id, p?.nombre || "");
+  };
+
+  // ---------- Editar ----------
   const cargarProductoParaEditar = (p) => {
     if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = null; }
     setPreview(p.imagen || null);
-    setNuevoProducto({ nombre:p.nombre, cantidad:p.cantidad, minimo:p.minimo, imagen:p.imagen || null, precio:p.precioUnitario || "" });
+    setNuevoProducto({
+      nombre:p.nombre, cantidad:p.cantidad, minimo:p.minimo,
+      imagen:p.imagen || null, precio:p.precioUnitario || "",
+      categoriaId: p.categoriaId || ""
+    });
     setEditandoId(p.id);
     window.scrollTo(0,0);
   };
 
-  useEffect(()=>{ setCargando(true); obtenerProductos().finally(()=>setCargando(false)); },[]);
-  useEffect(()=>{ (async()=>{ setCargando(true); setError(null);
-    try { debounced.trim() ? setProductos(await buscarPorPrefijo(debounced)) : await obtenerProductos(); }
-    catch(e){ console.error(e); setError("No se pudieron cargar los productos."); }
-    finally{ setCargando(false); }
-  })(); },[debounced]);
+  // ---------- Categorías: modal crear ----------
+  const normalizar = (s) => (s || "").trim();
+  const lower = (s) => normalizar(s).toLowerCase();
 
-  const productosVisibles = productos.filter(p => !soloAlertas || Number(p.cantidad) <= Number(p.minimo));
+  const abrirModalCategoria = () => setModalCategoria({ open: true, nombre: "" });
+  const cerrarModalCategoria = () => setModalCategoria({ open: false, nombre: "" });
+
+  const crearCategoria = async () => {
+    try {
+      const nombre = normalizar(modalCategoria.nombre);
+      if (!nombre) return;
+
+      // Evitar duplicados por nombreLower
+      const existe = categorias.some(c => (c.nombreLower || lower(c.nombre)) === lower(nombre));
+      if (existe) { cerrarModalCategoria(); return; }
+
+      const cat = { nombre, nombreLower: lower(nombre), creadoEn: new Date().toISOString() };
+      const ref = await addDoc(collection(db, "categorias"), cat);
+
+      await cargarCategorias();
+      setFiltroCategoria(ref.id); // opcional: selecciona la nueva en el filtro
+      cerrarModalCategoria();
+    } catch (e) {
+      console.error(e);
+      setError("No se pudo crear la categoría.");
+    }
+  };
+
+  // Enter/Esc en modal
+  const onKeyDownModal = (e) => {
+    if (!modalCategoria.open) return;
+    if (e.key === "Enter") { e.preventDefault(); crearCategoria(); }
+    if (e.key === "Escape") { e.preventDefault(); cerrarModalCategoria(); }
+  };
+
+  // ---------- Filtrado y agrupado en pantalla ----------
+  const productosFiltrados = useMemo(() => {
+    let list = productos.filter(p => !soloAlertas || Number(p.cantidad) <= Number(p.minimo));
+
+    if (filtroCategoria === "NONE") {
+      list = list.filter(p => !p.categoriaId);
+    } else if (filtroCategoria !== "ALL") {
+      list = list.filter(p => (p.categoriaId || "") === filtroCategoria);
+    }
+
+    return list;
+  }, [productos, soloAlertas, filtroCategoria]);
+
+  const grupos = useMemo(() => {
+    if (!agrupar) return null;
+    const map = new Map();
+    for (const p of productosFiltrados) {
+      const key = p.categoriaNombre || "Sin categoría";
+      if (!map.has(key)) map.set(key, []);
+      map.get(key).push(p);
+    }
+    for (const arr of map.values()) {
+      arr.sort((a,b) => (a.nombre || "").localeCompare(b.nombre || ""));
+    }
+    return Array.from(map.entries()).map(([nombre, items]) => ({ nombre, items }));
+  }, [agrupar, productosFiltrados]);
 
   return (
-    <div className="inv-root">
-      {/* Header con toggle de tema */}
+    <div className="inv-root" onKeyDown={onKeyDownModal}>
+      {/* Header */}
       <header className="inv-header">
-        <div>
-          <h1>Inventario de TEK</h1>
-          <p className="inv-subtle">
-            {busqueda ? `Resultados: ${productosVisibles.length}` : `Productos: ${productosVisibles.length}`}
-            {cargando ? " • Cargando..." : ""}
-          </p>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          {empresa?.logoUrl ? (
+            <img
+              src={empresa.logoUrl}
+              alt="Logo"
+              style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
+            />
+          ) : null}
+          <div>
+            <h1>{empresa?.nombre || "Inventario de TEK"}</h1>
+            <p className="inv-subtle">
+              {empresa?.nit ? `NIT: ${empresa.nit} • ` : ""}
+              {busqueda ? `Resultados: ${productosFiltrados.length}` : `Productos: ${productosFiltrados.length}`}
+              {cargando ? " • Cargando..." : ""}
+            </p>
+          </div>
         </div>
-        <div className="header-actions">
+
+        <div className="header-actions" style={{ gap: 8, flexWrap: "wrap" }}>
           <button className="btn theme-toggle" onClick={toggle} aria-label="Cambiar tema">
             {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
           </button>
           <Link to="/ventas" className="btn btn-primary">Registrar venta 🧾</Link>
+          <Link to="/clientes" className="btn">👥 Clientes</Link>
+          <Link to="/configuracion" className="btn">⚙️ Configuración</Link>
         </div>
       </header>
 
       {/* Toolbar */}
-      <section className="inv-toolbar">
+      <section className="inv-toolbar" style={{ rowGap: 10 }}>
+        {/* Buscador */}
         <div className="input-with-icon">
           <span className="icon">🔎</span>
           <input
@@ -191,6 +348,31 @@ function Inventario() {
           />
         </div>
 
+        {/* Filtro categoría */}
+        <div className="form-field" style={{ minWidth: 200 }}>
+          <label style={{ marginBottom: 4 }}>Categoría</label>
+          <select
+            value={filtroCategoria}
+            onChange={(e) => setFiltroCategoria(e.target.value)}
+          >
+            <option value="ALL">Todas</option>
+            <option value="NONE">Sin categoría</option>
+            {categorias.map(c => (
+              <option key={c.id} value={c.id}>{c.nombre}</option>
+            ))}
+          </select>
+        </div>
+
+        {/* Agrupar */}
+        <label className="checkbox">
+          <input type="checkbox" checked={agrupar} onChange={e => setAgrupar(e.target.checked)} />
+          <span>Agrupar por categoría</span>
+        </label>
+
+        {/* Botón para crear categoría (abre modal) */}
+        <button className="btn" onClick={abrirModalCategoria}>➕ Añadir</button>
+
+        {/* Stock bajo */}
         <label className="checkbox">
           <input type="checkbox" checked={soloAlertas} onChange={(e)=>setSoloAlertas(e.target.checked)} />
           <span>Solo stock bajo</span>
@@ -219,6 +401,21 @@ function Inventario() {
               <div className="form-field">
                 <label>Precio unitario</label>
                 <input type="number" name="precio" placeholder="0" value={nuevoProducto.precio} onChange={handleChange} />
+              </div>
+
+              {/* Selector de categoría del producto */}
+              <div className="form-field" style={{ gridColumn: "1 / -1" }}>
+                <label>Categoría</label>
+                <select
+                  name="categoriaId"
+                  value={nuevoProducto.categoriaId}
+                  onChange={handleChange}
+                >
+                  <option value="">Sin categoría</option>
+                  {categorias.map(c => (
+                    <option key={c.id} value={c.id}>{c.nombre}</option>
+                  ))}
+                </select>
               </div>
             </div>
 
@@ -255,43 +452,117 @@ function Inventario() {
         <div className="card">
           <div className="card-header"><h2>Productos</h2></div>
           <div className="card-body">
-            {productosVisibles.length === 0 && !cargando ? (
+            {productosFiltrados.length === 0 && !cargando ? (
               <p className="inv-subtle">{busqueda ? "No hay productos que coincidan con tu búsqueda." : "Aún no hay productos registrados."}</p>
             ) : (
-              <ul className="product-list">
-                {productosVisibles.map((p) => (
-                  <li className="product-item" key={p.id}>
-                    <div className="product-thumb">
-                      {p.imagen ? <img src={p.imagen} alt={p.nombre} /> : <div className="placeholder">Sin imagen</div>}
-                    </div>
-                    <div className="product-info">
-                      <div className="product-title-row">
-                        <strong>{p.nombre}</strong>
-                        {Number(p.cantidad) <= Number(p.minimo) && <span className="badge-danger">Stock bajo</span>}
+              <>
+                {!agrupar ? (
+                  <ul className="product-list">
+                    {productosFiltrados.map((p) => (
+                      <li className="product-item" key={p.id}>
+                        <div className="product-thumb">
+                          {p.imagen ? <img src={p.imagen} alt={p.nombre} /> : <div className="placeholder">Sin imagen</div>}
+                        </div>
+                        <div className="product-info">
+                          <div className="product-title-row">
+                            <strong>{p.nombre}</strong>
+                            {p.categoriaNombre && <span className="badge">{p.categoriaNombre}</span>}
+                            {Number(p.cantidad) <= Number(p.minimo) && <span className="badge-danger">Stock bajo</span>}
+                          </div>
+                          <div className="product-meta">
+                            <span>Cant: <b>{p.cantidad}</b></span>
+                            <span>Mín: <b>{p.minimo}</b></span>
+                            <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
+                          </div>
+                        </div>
+                        <div className="product-actions">
+                          <button className="btn btn-small" onClick={()=>cargarProductoParaEditar(p)}>Editar</button>
+                          <button className="btn btn-small btn-danger" onClick={()=>eliminarProducto(p.id)}>Eliminar</button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <div className="category-groups">
+                    {grupos?.map(g => (
+                      <div key={g.nombre} className="category-block">
+                        <div className="category-title">{g.nombre}</div>
+                        <ul className="product-list">
+                          {g.items.map(p => (
+                            <li className="product-item" key={p.id}>
+                              <div className="product-thumb">
+                                {p.imagen ? <img src={p.imagen} alt={p.nombre} /> : <div className="placeholder">Sin imagen</div>}
+                              </div>
+                              <div className="product-info">
+                                <div className="product-title-row">
+                                  <strong>{p.nombre}</strong>
+                                  {Number(p.cantidad) <= Number(p.minimo) && <span className="badge-danger">Stock bajo</span>}
+                                </div>
+                                <div className="product-meta">
+                                  <span>Cant: <b>{p.cantidad}</b></span>
+                                  <span>Mín: <b>{p.minimo}</b></span>
+                                  <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
+                                </div>
+                              </div>
+                              <div className="product-actions">
+                                <button className="btn btn-small" onClick={()=>cargarProductoParaEditar(p)}>Editar</button>
+                                <button className="btn btn-small btn-danger" onClick={()=>eliminarProducto(p.id)}>Eliminar</button>
+                              </div>
+                            </li>
+                          ))}
+                        </ul>
                       </div>
-                      <div className="product-meta">
-                        <span>Cant: <b>{p.cantidad}</b></span>
-                        <span>Mín: <b>{p.minimo}</b></span>
-                        <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
-                      </div>
-                    </div>
-                    <div className="product-actions">
-                      <button className="btn btn-small" onClick={()=>cargarProductoParaEditar(p)}>Editar</button>
-                      <button className="btn btn-small btn-danger" onClick={()=>eliminarProducto(p.id)}>Eliminar</button>
-                    </div>
-                  </li>
-                ))}
-              </ul>
+                    ))}
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>
       </section>
 
       {error && <div className="toast toast-error">{error}</div>}
+
+      {/* Modal de confirmación de eliminación */}
+      {confirmDelete.open && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <h3>¿Eliminar producto?</h3>
+            <p>Estás a punto de eliminar <strong>{confirmDelete.nombre}</strong>. Esta acción no se puede deshacer.</p>
+            <div className="modal-actions">
+              <button className="btn" onClick={cancelarEliminar}>Cancelar</button>
+              <button className="btn btn-danger" onClick={() => ejecutarEliminarProducto(confirmDelete.id)}>Eliminar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Nueva categoría */}
+      {modalCategoria.open && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card">
+            <h3>Nueva categoría</h3>
+            <p style={{ marginBottom: 10 }}>Escribe el nombre de la categoría.</p>
+            <input
+              autoFocus
+              type="text"
+              placeholder="Ej: Bebidas"
+              value={modalCategoria.nombre}
+              onChange={(e)=>setModalCategoria(s => ({...s, nombre: e.target.value}))}
+              style={{
+                width:"100%", padding:"10px 12px", borderRadius:10,
+                background:"var(--card)", border:"1px solid var(--border)", color:"var(--text)", outline:"none", marginBottom:12
+              }}
+            />
+            <div className="modal-actions">
+              <button className="btn" onClick={cerrarModalCategoria}>Cancelar (Esc)</button>
+              <button className="btn btn-primary" onClick={crearCategoria}>Crear (Enter)</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
 
 export default Inventario;
-
-

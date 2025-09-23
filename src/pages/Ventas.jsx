@@ -1,12 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { db } from "../../firebase";
 import {
-  collection, getDocs, addDoc, doc, updateDoc, serverTimestamp
+  collection, getDocs, addDoc, doc, updateDoc, serverTimestamp,
+  setDoc, getDoc
 } from "firebase/firestore";
 import { useNavigate, Link } from "react-router-dom";
 import "./inventario.css";
 
-// Reuso del hook de tema (copialo si no lo tienes global)
+// Reuso del hook de tema
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   useEffect(() => {
@@ -17,9 +18,19 @@ function useTheme() {
   return { theme, toggle };
 }
 
+// Normaliza el id de cliente a partir del documento (o “sin-doc”)
+const normalizarIdCliente = (docu) =>
+  (docu || "sin-doc")
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]/g, "-");
+
 export default function Ventas() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
+
+  const [empresa, setEmpresa] = useState(null);
 
   const [productos, setProductos] = useState([]);
   const [cliente, setCliente] = useState({ nombre: "", documento: "" });
@@ -27,6 +38,16 @@ export default function Ventas() {
   const [items, setItems] = useState([]);
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
+
+  // Cargar datos de empresa (logo/nombre/NIT)
+  useEffect(() => {
+    (async () => {
+      try {
+        const snap = await getDoc(doc(db, "empresas", "empresa"));
+        if (snap.exists()) setEmpresa(snap.data());
+      } catch {}
+    })();
+  }, []);
 
   // cargar productos
   useEffect(() => {
@@ -49,7 +70,7 @@ export default function Ventas() {
   }, [productoActual, seleccion.cantidad]);
 
   const total = useMemo(
-    () => items.reduce((acc, it) => acc + (Number(it.precioUnitario)*Number(it.cantidad)), 0),
+    () => items.reduce((acc, it) => acc + (Number(it.precioUnitario) * Number(it.cantidad)), 0),
     [items]
   );
 
@@ -64,7 +85,12 @@ export default function Ventas() {
     }
     // agregar o acumular
     const ya = items.findIndex(i => i.productoId === productoActual.id);
-    const base = { productoId: productoActual.id, nombre: productoActual.nombre, cantidad: cant, precioUnitario: Number(productoActual.precioUnitario || 0) };
+    const base = {
+      productoId: productoActual.id,
+      nombre: productoActual.nombre,
+      cantidad: cant,
+      precioUnitario: Number(productoActual.precioUnitario || 0)
+    };
     if (ya >= 0) {
       const nuevos = [...items];
       nuevos[ya] = { ...nuevos[ya], cantidad: nuevos[ya].cantidad + cant };
@@ -92,23 +118,44 @@ export default function Ventas() {
         }
       }
 
-      // Crear venta
+      // 1) Asegurar cliente en colección "clientes"
+      const nombreCli = (cliente.nombre || "-").trim() || "-";
+      const docCli = (cliente.documento || "-").trim() || "-";
+      const clienteId = normalizarIdCliente(docCli);
+      const clienteRef = doc(db, "clientes", clienteId);
+      const cliSnap = await getDoc(clienteRef);
+      if (!cliSnap.exists()) {
+        await setDoc(clienteRef, {
+          nombre: nombreCli,
+          documento: docCli,
+          creadoEn: serverTimestamp()
+        });
+      } else {
+        // Opcional: actualizar nombre si vino diferente
+        const actual = cliSnap.data();
+        if (nombreCli && nombreCli !== actual?.nombre) {
+          await setDoc(clienteRef, { nombre: nombreCli }, { merge: true });
+        }
+      }
+
+      // 2) Crear venta con referencia a cliente
       const venta = {
-        cliente: { nombre: cliente.nombre || "-", documento: cliente.documento || "-" },
+        cliente: { nombre: nombreCli, documento: docCli }, // compatibilidad con tu factura
+        clienteId: `clientes/${clienteId}`,
         items,
         total,
         fecha: serverTimestamp()
       };
       const ref = await addDoc(collection(db, "ventas"), venta);
 
-      // Descontar stock (simple)
+      // 3) Descontar stock (simple)
       await Promise.all(items.map(async (it) => {
         const prod = productos.find(p => p.id === it.productoId);
         const nuevaCantidad = Number(prod.cantidad) - Number(it.cantidad);
         await updateDoc(doc(db, "productos", it.productoId), { cantidad: nuevaCantidad });
       }));
 
-      // Navegar a factura
+      // 4) Navegar a factura
       navigate(`/factura/${ref.id}`);
     } catch (e) {
       console.error(e);
@@ -120,16 +167,28 @@ export default function Ventas() {
 
   return (
     <div className="inv-root">
+      {/* Header con marca de empresa + acciones */}
       <header className="inv-header">
-        <div>
-          <h1>Ventas</h1>
-          <p className="inv-subtle">Registra productos vendidos y genera la factura</p>
+        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
+          {empresa?.logoUrl ? (
+            <img
+              src={empresa.logoUrl}
+              alt="Logo"
+              style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
+            />
+          ) : null}
+          <div>
+            <h1>{empresa?.nombre || "Ventas"}</h1>
+            <p className="inv-subtle">{empresa?.nit ? `NIT: ${empresa.nit}` : "Registra productos vendidos y genera la factura"}</p>
+          </div>
         </div>
         <div className="header-actions">
           <button className="btn theme-toggle" onClick={toggle} aria-label="Cambiar tema">
             {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
           </button>
           <Link to="/" className="btn">← Inventario</Link>
+          <Link to="/clientes" className="btn">👥 Clientes</Link>
+          <Link to="/configuracion" className="btn">⚙️ Configuración</Link>
         </div>
       </header>
 
@@ -185,7 +244,7 @@ export default function Ventas() {
               </div>
             </div>
 
-            <div className="row" style={{ marginTop: 8 }}>
+            <div className="row" style={{ marginTop: 8, gap: 12, alignItems: "center" }}>
               <button className="btn" onClick={agregarItem}>➕ Agregar producto</button>
               {productoActual && (
                 <span className="inv-subtle">
