@@ -7,6 +7,33 @@ import {
 import { Link } from "react-router-dom";
 import "./inventario.css";
 
+// Estilos mínimos para el botón flotante (solo móvil)
+const FabStyles = () => (
+  <style>
+    {`
+    .fab {
+      position: fixed;
+      right: 16px;
+      bottom: 16px;
+      z-index: 50;
+      border: none;
+      border-radius: 999px;
+      padding: 14px 18px;
+      background: var(--primary);
+      color: #001018;
+      font-weight: 700;
+      box-shadow: 0 10px 18px rgba(0,0,0,.25);
+      cursor: pointer;
+    }
+    .fab:active { transform: translateY(1px); }
+    /* Ocultar en pantallas medianas/grandes */
+    @media (min-width: 768px){
+      .fab { display: none; }
+    }
+    `}
+  </style>
+);
+
 // === util para tema (persistencia en localStorage) ===
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
@@ -57,6 +84,10 @@ function Inventario() {
 
   // Confirmación de eliminación
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, nombre: "" });
+
+  // Ref del formulario (para scroll desde el FAB)
+  const formRef = useRef(null);
+  const scrollToForm = () => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
 
   // ---------- Efectos ----------
   // Debounce buscador
@@ -305,6 +336,8 @@ function Inventario() {
 
   return (
     <div className="inv-root" onKeyDown={onKeyDownModal}>
+      <FabStyles />
+
       {/* Header */}
       <header className="inv-header">
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
@@ -316,7 +349,7 @@ function Inventario() {
             />
           ) : null}
           <div>
-            <h1>{empresa?.nombre || "Inventario de TEK"}</h1>
+            <h1>{empresa?.nombre || "Inventario de Ordex"}</h1>
             <p className="inv-subtle">
               {empresa?.nit ? `NIT: ${empresa.nit} • ` : ""}
               {busqueda ? `Resultados: ${productosFiltrados.length}` : `Productos: ${productosFiltrados.length}`}
@@ -382,7 +415,7 @@ function Inventario() {
       {/* Grid principal */}
       <section className="inv-grid">
         {/* Card formulario */}
-        <div className="card">
+        <div className="card" ref={formRef}>
           <div className="card-header"><h2>{editandoId ? "Editar producto" : "Nuevo producto"}</h2></div>
           <div className="card-body">
             <div className="form-grid">
@@ -522,6 +555,11 @@ function Inventario() {
       </section>
 
       {error && <div className="toast toast-error">{error}</div>}
+
+      {/* FAB móvil: Nuevo producto */}
+      <button className="fab" onClick={scrollToForm} aria-label="Nuevo producto">
+        ➕ Nuevo
+      </button>
 
       {/* Modal de confirmación de eliminación */}
       {confirmDelete.open && (

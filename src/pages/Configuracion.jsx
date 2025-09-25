@@ -90,7 +90,7 @@ export default function Configuracion() {
             <div className="form-grid">
               <div className="form-field">
                 <label>Nombre de la empresa</label>
-                <input name="nombre" value={datos.nombre} onChange={onChange} placeholder="Ej: Minimercado TEK" />
+                <input name="nombre" value={datos.nombre} onChange={onChange} placeholder="Ej: Minimercado Ordex" />
               </div>
               <div className="form-field">
                 <label>NIT</label>
