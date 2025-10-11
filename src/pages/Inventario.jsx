@@ -1,38 +1,12 @@
 import { useEffect, useState, useRef, useMemo } from "react";
-import { db } from "../../firebase";
+import { db } from "../../firebaseClient";
 import {
   collection, getDocs, addDoc, deleteDoc, doc, updateDoc, getDoc,
   query, orderBy, startAt, endAt
 } from "firebase/firestore";
 import { Link } from "react-router-dom";
+import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
-
-// Estilos mínimos para el botón flotante (solo móvil)
-const FabStyles = () => (
-  <style>
-    {`
-    .fab {
-      position: fixed;
-      right: 16px;
-      bottom: 16px;
-      z-index: 50;
-      border: none;
-      border-radius: 999px;
-      padding: 14px 18px;
-      background: var(--primary);
-      color: #001018;
-      font-weight: 700;
-      box-shadow: 0 10px 18px rgba(0,0,0,.25);
-      cursor: pointer;
-    }
-    .fab:active { transform: translateY(1px); }
-    /* Ocultar en pantallas medianas/grandes */
-    @media (min-width: 768px){
-      .fab { display: none; }
-    }
-    `}
-  </style>
-);
 
 // === util para tema (persistencia en localStorage) ===
 function useTheme() {
@@ -47,12 +21,15 @@ function useTheme() {
 
 function Inventario() {
   const { theme, toggle } = useTheme();
+  const { empresa } = useTenant(); // empresa actual (id, nombre, etc.)
 
   // ---------- Estado principal ----------
   const [productos, setProductos] = useState([]);
   const [nuevoProducto, setNuevoProducto] = useState({
-    nombre: "", cantidad: "", minimo: "", imagen: null, precio: "",
-    categoriaId: ""   // "" = sin categoría
+    nombre: "", cantidad: "", minimo: "", imagen: null,
+    precio: "",           // precio de venta
+    costo: "",            // ✅ costo de compra
+    categoriaId: ""       // "" = sin categoría
   });
   const [editandoId, setEditandoId] = useState(null);
 
@@ -63,7 +40,7 @@ function Inventario() {
   const [error, setError] = useState(null);
   const [soloAlertas, setSoloAlertas] = useState(false);
 
-  // Categorías
+  // Categorías (por empresa)
   const [categorias, setCategorias] = useState([]);
   const [filtroCategoria, setFiltroCategoria] = useState("ALL"); // ALL | NONE | <categoriaId>
   const [agrupar, setAgrupar] = useState(false);
@@ -71,8 +48,8 @@ function Inventario() {
   // Modal: nueva categoría
   const [modalCategoria, setModalCategoria] = useState({ open: false, nombre: "" });
 
-  // Empresa (logo/nombre/NIT)
-  const [empresa, setEmpresa] = useState(null);
+  // Empresa (logo/nombre/NIT) – lo seguimos leyendo del doc raíz si existe
+  const [empresaInfo, setEmpresaInfo] = useState(null);
 
   // Imagenes / upload
   const inputCamaraRef = useRef(null);
@@ -85,9 +62,16 @@ function Inventario() {
   // Confirmación de eliminación
   const [confirmDelete, setConfirmDelete] = useState({ open: false, id: null, nombre: "" });
 
-  // Ref del formulario (para scroll desde el FAB)
-  const formRef = useRef(null);
-  const scrollToForm = () => formRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
+  // ---------- Deriva paths por empresa ----------
+  const productosCol = useMemo(() => {
+    if (!empresa?.id) return null;
+    return collection(db, "empresas", empresa.id, "productos");
+  }, [empresa]);
+
+  const categoriasCol = useMemo(() => {
+    if (!empresa?.id) return null;
+    return collection(db, "empresas", empresa.id, "categorias");
+  }, [empresa]);
 
   // ---------- Efectos ----------
   // Debounce buscador
@@ -106,35 +90,40 @@ function Inventario() {
     };
   }, []);
 
-  // Cargar empresa
+  // Cargar datos de empresa (opcional: logo/nombre/nit) desde doc raíz
   useEffect(() => {
     (async () => {
+      if (!empresa?.id) return;
       try {
-        const snap = await getDoc(doc(db, "empresas", "empresa"));
-        if (snap.exists()) setEmpresa(snap.data());
+        const snap = await getDoc(doc(db, "empresas", empresa.id));
+        if (snap.exists()) setEmpresaInfo(snap.data());
       } catch {}
     })();
-  }, []);
+  }, [empresa]);
 
-  // Cargar categorías
+  // Cargar categorías por empresa
   const cargarCategorias = async () => {
-    const snap = await getDocs(collection(db, "categorias"));
+    if (!categoriasCol) return;
+    const snap = await getDocs(categoriasCol);
     const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
     lista.sort((a,b) => (a.nombre || "").localeCompare(b.nombre || ""));
     setCategorias(lista);
   };
-  useEffect(() => { cargarCategorias(); }, []);
+  useEffect(() => { cargarCategorias(); }, [categoriasCol]);
 
-  // Cargar productos
+  // Cargar productos por empresa
   const obtenerProductos = async () => {
-    const snapshot = await getDocs(collection(db, "productos"));
+    if (!productosCol) return;
+    const snapshot = await getDocs(productosCol);
     setProductos(snapshot.docs.map(d => ({ id: d.id, ...d.data() })));
   };
+
   const buscarPorPrefijo = async (texto) => {
+    if (!productosCol) return [];
     const t = (texto || "").trim().toLowerCase();
     if (!t) return [];
     const qy = query(
-      collection(db, "productos"),
+      productosCol,
       orderBy("nombreLower"),
       startAt(t),
       endAt(t + "\uf8ff")
@@ -142,12 +131,24 @@ function Inventario() {
     const snap = await getDocs(qy);
     return snap.docs.map(d => ({ id: d.id, ...d.data() }));
   };
-  useEffect(()=>{ setCargando(true); obtenerProductos().finally(()=>setCargando(false)); },[]);
-  useEffect(()=>{ (async()=>{ setCargando(true); setError(null);
-    try { debounced.trim() ? setProductos(await buscarPorPrefijo(debounced)) : await obtenerProductos(); }
-    catch(e){ console.error(e); setError("No se pudieron cargar los productos."); }
-    finally{ setCargando(false); }
-  })(); },[debounced]);
+
+  useEffect(()=>{ 
+    if (!productosCol) return;
+    setCargando(true); 
+    obtenerProductos().finally(()=>setCargando(false)); 
+  },[productosCol]);
+
+  useEffect(()=>{ 
+    if (!productosCol) return;
+    (async()=>{ 
+      setCargando(true); setError(null);
+      try { 
+        debounced.trim() ? setProductos(await buscarPorPrefijo(debounced)) : await obtenerProductos(); 
+      }
+      catch(e){ console.error(e); setError("No se pudieron cargar los productos."); }
+      finally{ setCargando(false); }
+    })(); 
+  },[debounced, productosCol]);
 
   // ---------- Handlers de formulario ----------
   const handleChange = (e) => setNuevoProducto({ ...nuevoProducto, [e.target.name]: e.target.value });
@@ -196,6 +197,7 @@ function Inventario() {
 
   // ---------- Guardar producto ----------
   const agregarOActualizarProducto = async () => {
+    if (!productosCol) return;
     try {
       setError(null);
       let urlImagen = "";
@@ -218,20 +220,24 @@ function Inventario() {
         cantidad: parseInt(nuevoProducto.cantidad),
         minimo: parseInt(nuevoProducto.minimo),
         imagen: urlImagen || null,
-        precioUnitario: parseFloat(nuevoProducto.precio),
+        precioUnitario: parseFloat(nuevoProducto.precio || 0),
+        costoUnitario: parseFloat(nuevoProducto.costo || 0), // ✅ guardamos costo
         categoriaId: nuevoProducto.categoriaId || "",
         categoriaNombre: categoriaNombre || null
       };
 
       if (editandoId) {
-        await updateDoc(doc(db,"productos",editandoId), productoData);
+        await updateDoc(doc(db, "empresas", empresa.id, "productos", editandoId), productoData);
         setEditandoId(null);
       } else {
-        await addDoc(collection(db,"productos"), productoData);
+        await addDoc(productosCol, productoData);
       }
 
       quitarImagen();
-      setNuevoProducto({ nombre:"", cantidad:"", minimo:"", imagen:null, precio:"", categoriaId:"" });
+      setNuevoProducto({
+        nombre:"", cantidad:"", minimo:"", imagen:null,
+        precio:"", costo:"", categoriaId:""
+      });
       setUploadProgress(0); setSubiendo(false);
 
       if (debounced.trim()) setProductos(await buscarPorPrefijo(debounced));
@@ -243,9 +249,10 @@ function Inventario() {
 
   // ---------- Eliminar producto (con modal) ----------
   const ejecutarEliminarProducto = async (id) => {
+    if (!empresa?.id) return;
     try {
       setError(null);
-      await deleteDoc(doc(db,"productos",id));
+      await deleteDoc(doc(db, "empresas", empresa.id, "productos", id));
       setConfirmDelete({ open: false, id: null, nombre: "" });
       if (debounced.trim()) setProductos(await buscarPorPrefijo(debounced));
       else await obtenerProductos();
@@ -265,7 +272,9 @@ function Inventario() {
     setPreview(p.imagen || null);
     setNuevoProducto({
       nombre:p.nombre, cantidad:p.cantidad, minimo:p.minimo,
-      imagen:p.imagen || null, precio:p.precioUnitario || "",
+      imagen:p.imagen || null,
+      precio:p.precioUnitario || "",
+      costo:p.costoUnitario || "",          // ✅ cargamos costo al editar
       categoriaId: p.categoriaId || ""
     });
     setEditandoId(p.id);
@@ -280,19 +289,19 @@ function Inventario() {
   const cerrarModalCategoria = () => setModalCategoria({ open: false, nombre: "" });
 
   const crearCategoria = async () => {
+    if (!categoriasCol) return;
     try {
       const nombre = normalizar(modalCategoria.nombre);
       if (!nombre) return;
 
-      // Evitar duplicados por nombreLower
       const existe = categorias.some(c => (c.nombreLower || lower(c.nombre)) === lower(nombre));
       if (existe) { cerrarModalCategoria(); return; }
 
       const cat = { nombre, nombreLower: lower(nombre), creadoEn: new Date().toISOString() };
-      const ref = await addDoc(collection(db, "categorias"), cat);
+      const ref = await addDoc(categoriasCol, cat);
 
       await cargarCategorias();
-      setFiltroCategoria(ref.id); // opcional: selecciona la nueva en el filtro
+      setFiltroCategoria(ref.id); // opcional
       cerrarModalCategoria();
     } catch (e) {
       console.error(e);
@@ -334,24 +343,33 @@ function Inventario() {
     return Array.from(map.entries()).map(([nombre, items]) => ({ nombre, items }));
   }, [agrupar, productosFiltrados]);
 
+  // Si todavía no hay empresa en contexto, muestra loader simple
+  if (!empresa?.id) {
+    return (
+      <div className="inv-root">
+        <header className="inv-header">
+          <h1>Cargando empresa…</h1>
+        </header>
+      </div>
+    );
+  }
+
   return (
     <div className="inv-root" onKeyDown={onKeyDownModal}>
-      <FabStyles />
-
       {/* Header */}
       <header className="inv-header">
         <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          {empresa?.logoUrl ? (
+          {empresaInfo?.logoUrl ? (
             <img
-              src={empresa.logoUrl}
+              src={empresaInfo.logoUrl}
               alt="Logo"
               style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
             />
           ) : null}
           <div>
-            <h1>{empresa?.nombre || "Inventario de Ordex"}</h1>
+            <h1>{empresaInfo?.nombre || "Inventario"}</h1>
             <p className="inv-subtle">
-              {empresa?.nit ? `NIT: ${empresa.nit} • ` : ""}
+              {empresaInfo?.nit ? `NIT: ${empresaInfo.nit} • ` : ""}
               {busqueda ? `Resultados: ${productosFiltrados.length}` : `Productos: ${productosFiltrados.length}`}
               {cargando ? " • Cargando..." : ""}
             </p>
@@ -365,6 +383,8 @@ function Inventario() {
           <Link to="/ventas" className="btn btn-primary">Registrar venta 🧾</Link>
           <Link to="/clientes" className="btn">👥 Clientes</Link>
           <Link to="/configuracion" className="btn">⚙️ Configuración</Link>
+          <Link to="/importar" className="btn">⬆️ Importar</Link>
+
         </div>
       </header>
 
@@ -415,7 +435,7 @@ function Inventario() {
       {/* Grid principal */}
       <section className="inv-grid">
         {/* Card formulario */}
-        <div className="card" ref={formRef}>
+        <div className="card">
           <div className="card-header"><h2>{editandoId ? "Editar producto" : "Nuevo producto"}</h2></div>
           <div className="card-body">
             <div className="form-grid">
@@ -432,8 +452,12 @@ function Inventario() {
                 <input type="number" name="minimo" placeholder="0" value={nuevoProducto.minimo} onChange={handleChange} />
               </div>
               <div className="form-field">
-                <label>Precio unitario</label>
+                <label>Precio de venta</label>
                 <input type="number" name="precio" placeholder="0" value={nuevoProducto.precio} onChange={handleChange} />
+              </div>
+              <div className="form-field">
+                <label>Costo (lo que te vale)</label>
+                <input type="number" name="costo" placeholder="0" value={nuevoProducto.costo} onChange={handleChange} />
               </div>
 
               {/* Selector de categoría del producto */}
@@ -506,6 +530,7 @@ function Inventario() {
                             <span>Cant: <b>{p.cantidad}</b></span>
                             <span>Mín: <b>{p.minimo}</b></span>
                             <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
+                            <span>Costo: <b>${p.costoUnitario?.toLocaleString() || "N/D"}</b></span>
                           </div>
                         </div>
                         <div className="product-actions">
@@ -535,6 +560,7 @@ function Inventario() {
                                   <span>Cant: <b>{p.cantidad}</b></span>
                                   <span>Mín: <b>{p.minimo}</b></span>
                                   <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
+                                  <span>Costo: <b>${p.costoUnitario?.toLocaleString() || "N/D"}</b></span>
                                 </div>
                               </div>
                               <div className="product-actions">
@@ -555,11 +581,6 @@ function Inventario() {
       </section>
 
       {error && <div className="toast toast-error">{error}</div>}
-
-      {/* FAB móvil: Nuevo producto */}
-      <button className="fab" onClick={scrollToForm} aria-label="Nuevo producto">
-        ➕ Nuevo
-      </button>
 
       {/* Modal de confirmación de eliminación */}
       {confirmDelete.open && (

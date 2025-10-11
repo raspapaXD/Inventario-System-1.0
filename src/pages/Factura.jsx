@@ -2,12 +2,13 @@
 import { useParams, Link } from "react-router-dom";
 import { useEffect, useMemo, useState } from "react";
 import { doc, getDoc } from "firebase/firestore";
-import { db } from "../../firebase";
+import { db } from "../../firebaseClient";
 import jsPDF from "jspdf";
 import html2canvas from "html2canvas";
 import "./inventario.css";
+import { useTenant } from "../tenant/TenantProvider";
 
-// Hook de tema (único)
+// Pequeño hook de tema (igual al resto)
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   useEffect(() => {
@@ -21,30 +22,48 @@ function useTheme() {
 export default function Factura() {
   const { id } = useParams();
   const { theme, toggle } = useTheme();
+  const { empresa } = useTenant(); // { id, ... } y campos nombre/nit/logoUrl vienen del doc
 
-  const [empresa, setEmpresa] = useState(null);
   const [venta, setVenta] = useState(null);
+  const [empresaInfo, setEmpresaInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState(null);
 
-  // Cargar empresa (logo/nombre/NIT)
+  // Cargar empresa (nombre/nit/logo)
   useEffect(() => {
     (async () => {
       try {
-        const snap = await getDoc(doc(db, "empresas", "empresa"));
-        if (snap.exists()) setEmpresa(snap.data());
-      } catch {}
+        if (!empresa?.id) return;
+        const esnap = await getDoc(doc(db, "empresas", empresa.id));
+        setEmpresaInfo(esnap.exists() ? esnap.data() : {});
+      } catch (e) {
+        console.error(e);
+      }
     })();
-  }, []);
+  }, [empresa?.id]);
 
-  // Cargar venta
+  // Cargar venta: primero intenta en empresas/{empresaId}/ventas/{id}, si no, en ventas/{id}
   useEffect(() => {
     (async () => {
       try {
         setErr(null);
-        const snap = await getDoc(doc(db, "ventas", id));
-        if (snap.exists()) setVenta(snap.data());
-        else setErr("Venta no encontrada.");
+        setLoading(true);
+
+        let vsnap = null;
+        if (empresa?.id) {
+          vsnap = await getDoc(doc(db, "empresas", empresa.id, "ventas", id));
+        }
+        if (!vsnap || !vsnap.exists()) {
+          // compatibilidad con datos antiguos
+          const legacy = await getDoc(doc(db, "ventas", id));
+          if (legacy.exists()) vsnap = legacy;
+        }
+
+        if (vsnap && vsnap.exists()) {
+          setVenta(vsnap.data());
+        } else {
+          setErr("Venta no encontrada.");
+        }
       } catch (e) {
         console.error(e);
         setErr("Error al obtener la venta.");
@@ -52,9 +71,9 @@ export default function Factura() {
         setLoading(false);
       }
     })();
-  }, [id]);
+  }, [id, empresa?.id]);
 
-  // Normaliza items (soporta venta.items y venta.productos)
+  // Normalización de ítems (soporta .items o .productos)
   const items = useMemo(() => {
     if (!venta) return [];
     return (venta.items || venta.productos || []).map((it) => ({
@@ -71,7 +90,8 @@ export default function Factura() {
 
   const clienteNombre =
     (venta?.cliente && typeof venta.cliente === "object" ? venta.cliente.nombre : venta?.cliente) ||
-    venta?.clienteNombre || "Consumidor final";
+    venta?.clienteNombre ||
+    "Consumidor final";
 
   const clienteDocumento =
     (venta?.cliente && typeof venta.cliente === "object" ? venta.cliente.documento : venta?.documento) || "";
@@ -85,15 +105,16 @@ export default function Factura() {
     return null;
   }, [venta]);
 
-  const formatear = (n) => (Number.isFinite(n) ? n : 0).toLocaleString(undefined, { minimumFractionDigits: 0 });
+  const formatear = (n) => (Number.isFinite(n) ? n : 0).toLocaleString();
   const fechaStr = fecha ? fecha.toLocaleString() : "—";
 
-  // Generar PDF desde el "paper" especial (no se corta)
+  // Generar PDF a partir de la sección #factura-pdf (no cortado)
   const generarPDF = async () => {
     const nodo = document.getElementById("factura-pdf");
     if (!nodo) return;
 
-    const bg = getComputedStyle(document.body).backgroundColor || (theme === "dark" ? "#0f1115" : "#ffffff");
+    const bg =
+      getComputedStyle(document.body).backgroundColor || (theme === "dark" ? "#0f1115" : "#ffffff");
 
     const canvas = await html2canvas(nodo, {
       backgroundColor: bg,
@@ -124,19 +145,12 @@ export default function Factura() {
     pdf.save(`Factura-${id}.pdf`);
   };
 
+  // Carga/errores
   if (loading) {
     return (
       <div className="inv-root">
         <header className="inv-header">
-          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-            {empresa?.logoUrl ? (
-              <img src={empresa.logoUrl} alt="Logo" style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }} />
-            ) : null}
-            <div>
-              <h1>{empresa?.nombre || "Factura"}</h1>
-              {empresa?.nit && <p className="inv-subtle">NIT: {empresa.nit}</p>}
-            </div>
-          </div>
+          <div><h1>Factura</h1></div>
           <div className="header-actions">
             <button className="btn theme-toggle" onClick={toggle}>
               {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
@@ -153,15 +167,7 @@ export default function Factura() {
     return (
       <div className="inv-root">
         <header className="inv-header">
-          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-            {empresa?.logoUrl ? (
-              <img src={empresa.logoUrl} alt="Logo" style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }} />
-            ) : null}
-            <div>
-              <h1>{empresa?.nombre || "Factura"}</h1>
-              {empresa?.nit && <p className="inv-subtle">NIT: {empresa.nit}</p>}
-            </div>
-          </div>
+          <div><h1>Factura</h1></div>
           <div className="header-actions">
             <button className="btn theme-toggle" onClick={toggle}>
               {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
@@ -176,21 +182,26 @@ export default function Factura() {
     );
   }
 
+  const folio = id.slice(0, 8).toUpperCase();
+
   return (
     <div className="inv-root">
-      {/* Header pantalla */}
+      {/* Header en app */}
       <header className="inv-header">
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          {empresa?.logoUrl ? (
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {empresaInfo?.logoUrl ? (
             <img
-              src={empresa.logoUrl}
+              src={empresaInfo.logoUrl}
               alt="Logo"
-              style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
+              style={{ width: 36, height: 36, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)" }}
             />
           ) : null}
           <div>
-            <h1>{empresa?.nombre || "Factura"}</h1>
-            <p className="inv-subtle">{empresa?.nit ? `NIT: ${empresa.nit}` : "Comprobante de venta y detalle de productos"}</p>
+            <h1>{empresaInfo?.nombre || "Factura"}</h1>
+            <p className="inv-subtle">
+              {empresaInfo?.nit ? `NIT: ${empresaInfo.nit} • ` : ""}
+              Comprobante de venta
+            </p>
           </div>
         </div>
         <div className="header-actions">
@@ -198,6 +209,7 @@ export default function Factura() {
             {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
           </button>
           <Link to="/" className="btn">← Inventario</Link>
+          <button className="btn btn-primary" onClick={generarPDF}>Descargar PDF 🧾</button>
         </div>
       </header>
 
@@ -205,102 +217,76 @@ export default function Factura() {
       <section className="inv-grid" style={{ gridTemplateColumns: "1fr" }}>
         <div className="card">
           <div className="card-header">
-            <h2>Factura #{id.slice(0, 8).toUpperCase()}</h2>
+            <h2>Factura #{folio}</h2>
           </div>
           <div className="card-body">
-            <div className="form-grid">
-              <div className="form-field">
-                <label>Cliente</label>
-                <input value={clienteNombre} readOnly />
+            {/* Encabezado */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 12 }}>
+              <div>
+                <div className="inv-subtle" style={{ fontSize: 12 }}>Cliente</div>
+                <div style={{ fontWeight: 600 }}>{clienteNombre}</div>
+                {clienteDocumento ? <div className="inv-subtle">Doc: {clienteDocumento}</div> : null}
               </div>
-              <div className="form-field">
-                <label>Documento</label>
-                <input value={clienteDocumento || "—"} readOnly />
-              </div>
-            </div>
-
-            <div className="form-grid" style={{ marginTop: 8 }}>
-              <div className="form-field">
-                <label>Fecha</label>
-                <input value={fechaStr} readOnly />
-              </div>
-              <div className="form-field">
-                <label>Total</label>
-                <input value={`$ ${formatear(total)}`} readOnly />
+              <div>
+                <div className="inv-subtle" style={{ fontSize: 12 }}>Fecha</div>
+                <div style={{ fontWeight: 600 }}>{fechaStr}</div>
               </div>
             </div>
 
-            <div style={{ marginTop: 16 }}>
-              <div className="product-item" style={{ background: "transparent" }}>
-                <div className="product-info" style={{ gridColumn: "1 / -1" }}>
-                  <div className="product-title-row" style={{ justifyContent: "space-between" }}>
-                    <strong>Productos vendidos</strong>
-                    <span className="inv-subtle">{items.length} ítem(s)</span>
+            {/* Tabla productos */}
+            <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 100px 140px 140px",
+                gap: 8,
+                padding: "10px 12px",
+                background: "var(--card)",
+                borderBottom: "1px solid var(--border)",
+                fontWeight: 600
+              }}>
+                <div>Producto</div>
+                <div style={{ textAlign: "right" }}>Cant.</div>
+                <div style={{ textAlign: "right" }}>P. Unit</div>
+                <div style={{ textAlign: "right" }}>Subtotal</div>
+              </div>
+
+              {items.map((it, idx) => {
+                const sub = it.cantidad * it.precioUnitario;
+                return (
+                  <div key={idx} style={{
+                    display: "grid",
+                    gridTemplateColumns: "1fr 100px 140px 140px",
+                    gap: 8,
+                    padding: "10px 12px",
+                    borderBottom: "1px solid var(--border)"
+                  }}>
+                    <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {it.nombre}
+                    </div>
+                    <div style={{ textAlign: "right" }}>{formatear(it.cantidad)}</div>
+                    <div style={{ textAlign: "right" }}>${formatear(it.precioUnitario)}</div>
+                    <div style={{ textAlign: "right" }}>${formatear(sub)}</div>
                   </div>
-                </div>
-              </div>
+                );
+              })}
 
               <div style={{
-                border: "1px solid var(--border)",
-                borderRadius: 12,
-                overflow: "hidden",
-                marginTop: 8
+                display: "grid",
+                gridTemplateColumns: "1fr 100px 140px 140px",
+                gap: 8,
+                padding: "12px",
+                fontWeight: 700
               }}>
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 100px 140px 140px",
-                  gap: 8,
-                  padding: "10px 12px",
-                  background: "var(--card)",
-                  borderBottom: "1px solid var(--border)",
-                  fontWeight: 600
-                }}>
-                  <div>Producto</div>
-                  <div style={{ textAlign: "right" }}>Cant.</div>
-                  <div style={{ textAlign: "right" }}>P. Unit</div>
-                  <div style={{ textAlign: "right" }}>Subtotal</div>
-                </div>
-
-                {items.map((it, idx) => {
-                  const sub = it.cantidad * it.precioUnitario;
-                  return (
-                    <div key={idx} style={{
-                      display: "grid",
-                      gridTemplateColumns: "1fr 100px 140px 140px",
-                      gap: 8,
-                      padding: "10px 12px",
-                      borderBottom: "1px solid var(--border)"
-                    }}>
-                      <div style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                        {it.nombre}
-                      </div>
-                      <div style={{ textAlign: "right" }}>{formatear(it.cantidad)}</div>
-                      <div style={{ textAlign: "right" }}>${formatear(it.precioUnitario)}</div>
-                      <div style={{ textAlign: "right" }}>${formatear(sub)}</div>
-                    </div>
-                  );
-                })}
-
-                <div style={{
-                  display: "grid",
-                  gridTemplateColumns: "1fr 100px 140px 140px",
-                  gap: 8,
-                  padding: "12px",
-                  fontWeight: 700
-                }}>
-                  <div />
-                  <div />
-                  <div style={{ textAlign: "right" }}>TOTAL</div>
-                  <div style={{ textAlign: "right" }}>${formatear(total)}</div>
-                </div>
+                <div />
+                <div />
+                <div style={{ textAlign: "right" }}>TOTAL</div>
+                <div style={{ textAlign: "right" }}>${formatear(total)}</div>
               </div>
             </div>
           </div>
 
           <div className="card-footer">
-            <button className="btn btn-primary" onClick={generarPDF}>
-              Descargar PDF 🧾
-            </button>
+            <button className="btn btn-primary" onClick={generarPDF}>Descargar PDF 🧾</button>
           </div>
         </div>
       </section>
@@ -309,7 +295,7 @@ export default function Factura() {
       <div
         id="factura-pdf"
         style={{
-          width: "794px",                 // A4 a ~96dpi
+          width: "794px",       // A4 @ 96dpi
           margin: "0 auto",
           padding: "24px",
           background: getComputedStyle(document.body).backgroundColor,
@@ -317,31 +303,26 @@ export default function Factura() {
           borderRadius: "12px",
         }}
       >
-        {/* Cabecera empresa para PDF (se renderiza en el archivo) */}
-        <div style={{
-          display:"flex", alignItems:"center", justifyContent:"space-between",
-          marginBottom: 16, paddingBottom: 12, borderBottom: "1px solid var(--border)"
-        }}>
-          <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-            {empresa?.logoUrl && (
-              <img
-                src={empresa.logoUrl}
-                alt="Logo"
-                style={{ width:48, height:48, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
-              />
-            )}
-            <div>
-              <div style={{ fontWeight:700, fontSize:18 }}>{empresa?.nombre || "Mi Empresa"}</div>
-              {empresa?.nit && <div className="inv-subtle" style={{ fontSize:12 }}>NIT: {empresa.nit}</div>}
-            </div>
+        {/* Encabezado empresa */}
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 10 }}>
+          {empresaInfo?.logoUrl ? (
+            <img
+              src={empresaInfo.logoUrl}
+              alt="Logo"
+              style={{ width: 48, height: 48, borderRadius: 8, objectFit: "cover", border: "1px solid var(--border)" }}
+            />
+          ) : null}
+          <div>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>{empresaInfo?.nombre || "Mi Empresa"}</div>
+            {empresaInfo?.nit ? <div className="inv-subtle">NIT: {empresaInfo.nit}</div> : null}
           </div>
-          <div style={{ textAlign:"right" }}>
-            <div style={{ fontWeight:700, fontSize:16 }}>FACTURA</div>
-            <div className="inv-subtle" style={{ fontSize:12 }}>#{id.slice(0,8).toUpperCase()}</div>
+          <div style={{ marginLeft: "auto", textAlign: "right" }}>
+            <div style={{ fontSize: 18, fontWeight: 700 }}>Factura #{folio}</div>
+            <div className="inv-subtle">{fechaStr}</div>
           </div>
         </div>
 
-        {/* Datos de cliente/fecha/total */}
+        {/* Datos cliente */}
         <div style={{
           display: "grid",
           gridTemplateColumns: "1fr 1fr",
@@ -351,14 +332,7 @@ export default function Factura() {
           <div>
             <div style={{ fontSize: 12, color: "var(--muted)" }}>Cliente</div>
             <div style={{ fontWeight: 600 }}>{clienteNombre}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>Documento</div>
-            <div style={{ fontWeight: 600 }}>{clienteDocumento || "—"}</div>
-          </div>
-          <div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>Fecha</div>
-            <div style={{ fontWeight: 600 }}>{fechaStr}</div>
+            {clienteDocumento ? <div className="inv-subtle">Doc: {clienteDocumento}</div> : null}
           </div>
           <div>
             <div style={{ fontSize: 12, color: "var(--muted)" }}>Total</div>
@@ -366,7 +340,7 @@ export default function Factura() {
           </div>
         </div>
 
-        {/* Tabla */}
+        {/* Tabla PDF */}
         <div style={{ border: "1px solid var(--border)", borderRadius: 12, overflow: "hidden" }}>
           <div style={{
             display: "grid",
@@ -424,5 +398,3 @@ export default function Factura() {
     </div>
   );
 }
-
-

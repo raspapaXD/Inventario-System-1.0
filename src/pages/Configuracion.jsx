@@ -1,120 +1,123 @@
-import { useEffect, useState, useRef } from "react";
-import { db } from "../../firebase";
-import { doc, getDoc, setDoc, serverTimestamp } from "firebase/firestore";
+// src/pages/Configuracion.jsx
+import { useEffect, useState } from "react";
+import { useTenant } from "../tenant/TenantProvider";
+import { Link } from "react-router-dom";
+import InstallPWA from "../components/InstallPWA.jsx";
+import { doc, getDoc } from "firebase/firestore";
+import { db } from "../../firebaseClient.js";
+
 import "./inventario.css";
 
-function dataURLtoFile(dataUrl, filename) {
-  const arr = dataUrl.split(","), mime = arr[0].match(/:(.*?);/)[1], bstr = atob(arr[1]);
-  let n = bstr.length; const u8 = new Uint8Array(n); while(n--) u8[n] = bstr.charCodeAt(n);
-  return new File([u8], filename, { type: mime });
-}
-async function comprimirImagen(file, { maxWidth=800, maxHeight=800, quality=0.8, outputType="image/jpeg" } = {}) {
-  const img = await new Promise((res, rej) => {
-    const u = URL.createObjectURL(file); const im = new Image();
-    im.onload = () => { URL.revokeObjectURL(u); res(im); }; im.onerror = rej; im.src = u;
-  });
-  const ratio = Math.min(maxWidth/img.width, maxHeight/img.height, 1);
-  const w = Math.round(img.width*ratio), h = Math.round(img.height*ratio);
-  const canvas = document.createElement("canvas"); canvas.width=w; canvas.height=h; const ctx=canvas.getContext("2d");
-  ctx.drawImage(img,0,0,w,h); const dataUrl = canvas.toDataURL(outputType, quality);
-  const base = file.name.replace(/\.[^/.]+$/, ""); return dataURLtoFile(dataUrl, `${base}.jpg`);
-}
-function subirImagenAImgBB(file){
-  const fd=new FormData(); fd.append("image", file);
-  return fetch("https://api.imgbb.com/1/upload?key=46bbab2f0ec657f928ab05ac5d78c37b",{method:"POST", body:fd})
-    .then(r=>r.json()).then(j=>j?.data?.url);
+function useTheme() {
+  const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
+  useEffect(() => {
+    document.documentElement.setAttribute("data-theme", theme);
+    localStorage.setItem("theme", theme);
+  }, [theme]);
+  const toggle = () => setTheme((t) => (t === "dark" ? "light" : "dark"));
+  return { theme, toggle };
 }
 
 export default function Configuracion() {
-  const [datos, setDatos] = useState({ nombre: "", nit: "", logoUrl: "" });
-  const [logoFile, setLogoFile] = useState(null);
-  const [preview, setPreview] = useState(null);
-  const [guardando, setGuardando] = useState(false);
-  const [msg, setMsg] = useState("");
-
-  const fileRef = useRef(null);
+  const { theme, toggle } = useTheme();
+  const { empresa, user, unlinkCurrentDevice, deviceError } = useTenant();
+  const [empresaData, setEmpresaData] = useState(null);
+  const [freeing, setFreeing] = useState(false);
+  const [msg, setMsg] = useState(null);
 
   useEffect(() => {
     (async () => {
-      const snap = await getDoc(doc(db, "empresas", "empresa"));
-      if (snap.exists()) setDatos(snap.data());
+      if (!empresa?.id) return;
+      const snap = await getDoc(doc(db, "empresas", empresa.id));
+      setEmpresaData(snap.exists() ? snap.data() : null);
     })();
-  }, []);
+  }, [empresa]);
 
-  const onChange = (e) => setDatos({ ...datos, [e.target.name]: e.target.value });
-  const onPick = (e) => {
-    const f = e.target.files?.[0];
-    if (!f) return;
-    setLogoFile(f);
-    setPreview(URL.createObjectURL(f));
-  };
-
-  const guardar = async () => {
+  const handleFreeDevice = async () => {
+    if (!empresa?.id) return;
     try {
-      setGuardando(true); setMsg("");
-      let url = datos.logoUrl || "";
-      if (logoFile) {
-        const comp = await comprimirImagen(logoFile);
-        const sub = await subirImagenAImgBB(comp);
-        if (sub) url = sub;
-      }
-      await setDoc(doc(db, "empresas", "empresa"), {
-        nombre: (datos.nombre || "").trim(),
-        nit: (datos.nit || "").trim(),
-        logoUrl: url || "",
-        actualizadoEn: serverTimestamp()
-      }, { merge: true });
-      setDatos((d) => ({ ...d, logoUrl: url }));
-      setMsg("✅ Configuración guardada");
+      setFreeing(true);
+      setMsg(null);
+      await unlinkCurrentDevice(empresa.id);
+      setMsg("Este dispositivo fue desvinculado. Cierra sesión e inicia de nuevo si deseas volver a registrarlo.");
     } catch (e) {
       console.error(e);
-      setMsg("❌ No se pudo guardar");
+      setMsg("No se pudo desvincular este dispositivo.");
     } finally {
-      setGuardando(false);
+      setFreeing(false);
     }
   };
 
+  const used = Number(empresaData?.devicesCount ?? 0);
+  const max  = Number(empresaData?.maxDispositivos ?? 3);
+
   return (
     <div className="inv-root">
+      {/* Header */}
       <header className="inv-header">
         <div>
-          <h1>Configuración de la empresa</h1>
-          <p className="inv-subtle">Logo, nombre y NIT para usar en toda la app y facturas</p>
+          <h1>Configuración</h1>
+          <p className="inv-subtle">
+            {empresa?.nombre || "Empresa"} — {user?.email}
+          </p>
+        </div>
+        <div className="header-actions">
+          <button className="btn theme-toggle" onClick={toggle}>
+            {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
+          </button>
+          <Link to="/" className="btn">← Inventario</Link>
         </div>
       </header>
 
+      {/* Contenido */}
       <section className="inv-grid" style={{ gridTemplateColumns: "1fr" }}>
         <div className="card">
-          <div className="card-header"><h2>Datos de empresa</h2></div>
+          <div className="card-header"><h2>Opciones de la empresa</h2></div>
           <div className="card-body">
-            <div className="form-grid">
-              <div className="form-field">
-                <label>Nombre de la empresa</label>
-                <input name="nombre" value={datos.nombre} onChange={onChange} placeholder="Ej: Minimercado Ordex" />
-              </div>
-              <div className="form-field">
-                <label>NIT</label>
-                <input name="nit" value={datos.nit} onChange={onChange} placeholder="Ej: 900.123.456-7" />
-              </div>
-            </div>
+            <p><strong>Nombre:</strong> {empresa?.nombre || "—"}</p>
+            <p><strong>NIT:</strong> {empresa?.nit || "—"}</p>
+            <p><strong>Correo administrador:</strong> {user?.email}</p>
+          </div>
+        </div>
 
-            <div className="image-actions" style={{ marginTop: 8 }}>
-              <button className="btn" onClick={() => fileRef.current?.click()}>🖼️ Subir logo</button>
-              <input ref={fileRef} type="file" accept="image/*" onChange={onPick} style={{ display: "none" }} />
-            </div>
+        <div className="card">
+          <div className="card-header"><h2>Dispositivos</h2></div>
+          <div className="card-body">
+            <p className="inv-subtle">Cupo de dispositivos por empresa.</p>
+            <p><strong>Ocupados:</strong> {used} / {max}</p>
 
-            { (preview || datos.logoUrl) && (
-              <div className="preview-row">
-                <img className="preview-img" src={preview || datos.logoUrl} alt="Logo" />
+            {deviceError && (
+              <div className="toast toast-error" style={{ position: "static", marginTop: 12 }}>
+                {deviceError}
               </div>
             )}
 
-            {msg && <div style={{ marginTop: 10 }} className={`toast ${msg.startsWith("❌") ? "toast-error":""}`} >{msg}</div>}
+            {msg && (
+              <div className="toast" style={{ position: "static", marginTop: 12 }}>
+                {msg}
+              </div>
+            )}
+
+            <div style={{ marginTop: 12 }}>
+              <button className="btn btn-muted" onClick={handleFreeDevice} disabled={freeing}>
+                {freeing ? "Desvinculando..." : "Desvincular este dispositivo"}
+              </button>
+              <p className="inv-subtle" style={{ marginTop: 8 }}>
+                Úsalo si necesitas liberar un cupo. (No cierra sesión automáticamente.)
+              </p>
+            </div>
           </div>
-          <div className="card-footer">
-            <button className="btn btn-primary" onClick={guardar} disabled={guardando}>
-              {guardando ? "Guardando..." : "Guardar cambios"}
-            </button>
+        </div>
+
+        <div className="card">
+          <div className="card-header"><h2>Instalar aplicación</h2></div>
+          <div className="card-body">
+            <p>
+              Puedes instalar esta aplicación en tu dispositivo para usarla como
+              si fuera una app nativa. En Android aparecerá un diálogo; en iPhone
+              usa “Compartir → Añadir a pantalla de inicio”.
+            </p>
+            <InstallPWA className="btn btn-primary" />
           </div>
         </div>
       </section>

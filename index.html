@@ -1,10 +1,23 @@
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Vite + React</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+    <!-- PWA: colores y comportamiento -->
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="application-name" content="Ordexa" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Ordexa" />
+
+    <!-- Íconos (ya están en /public) -->
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="icon" href="/pwa-192.png" sizes="192x192" />
+    <link rel="icon" href="/pwa-512.png" sizes="512x512" />
+
+    <!-- El manifiesto lo inyecta vite-plugin-pwa en build -->
+    <title>Ordexa</title>
   </head>
   <body>
     <div id="root"></div>

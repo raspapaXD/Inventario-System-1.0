@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
-import { db } from "../../firebase";
+import { db } from "../../firebaseClient";
 import {
-  collection, getDocs, addDoc, doc, updateDoc, serverTimestamp,
-  setDoc, getDoc
+  collection, getDocs, addDoc, doc, updateDoc, serverTimestamp
 } from "firebase/firestore";
 import { useNavigate, Link } from "react-router-dom";
+import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
 // Reuso del hook de tema
@@ -18,19 +18,10 @@ function useTheme() {
   return { theme, toggle };
 }
 
-// Normaliza el id de cliente a partir del documento (o “sin-doc”)
-const normalizarIdCliente = (docu) =>
-  (docu || "sin-doc")
-    .toString()
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9_-]/g, "-");
-
 export default function Ventas() {
   const { theme, toggle } = useTheme();
   const navigate = useNavigate();
-
-  const [empresa, setEmpresa] = useState(null);
+  const { empresa } = useTenant();
 
   const [productos, setProductos] = useState([]);
   const [cliente, setCliente] = useState({ nombre: "", documento: "" });
@@ -39,24 +30,15 @@ export default function Ventas() {
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState(null);
 
-  // Cargar datos de empresa (logo/nombre/NIT)
+  // cargar productos de la empresa
   useEffect(() => {
     (async () => {
-      try {
-        const snap = await getDoc(doc(db, "empresas", "empresa"));
-        if (snap.exists()) setEmpresa(snap.data());
-      } catch {}
-    })();
-  }, []);
-
-  // cargar productos
-  useEffect(() => {
-    (async () => {
-      const snap = await getDocs(collection(db, "productos"));
+      if (!empresa?.id) return;
+      const snap = await getDocs(collection(db, "empresas", empresa.id, "productos"));
       const lista = snap.docs.map(d => ({ id: d.id, ...d.data() }));
       setProductos(lista);
     })();
-  }, []);
+  }, [empresa]);
 
   const productoActual = useMemo(
     () => productos.find(p => p.id === seleccion.productoId) || null,
@@ -70,7 +52,7 @@ export default function Ventas() {
   }, [productoActual, seleccion.cantidad]);
 
   const total = useMemo(
-    () => items.reduce((acc, it) => acc + (Number(it.precioUnitario) * Number(it.cantidad)), 0),
+    () => items.reduce((acc, it) => acc + (Number(it.precioUnitario)*Number(it.cantidad)), 0),
     [items]
   );
 
@@ -89,7 +71,8 @@ export default function Ventas() {
       productoId: productoActual.id,
       nombre: productoActual.nombre,
       cantidad: cant,
-      precioUnitario: Number(productoActual.precioUnitario || 0)
+      precioUnitario: Number(productoActual.precioUnitario || 0),
+      costoUnitario: Number(productoActual.costoUnitario || 0) // ✅ guardamos costo en el item
     };
     if (ya >= 0) {
       const nuevos = [...items];
@@ -106,6 +89,7 @@ export default function Ventas() {
 
   const registrarVenta = async () => {
     try {
+      if (!empresa?.id) { setError("No hay empresa activa."); return; }
       setGuardando(true); setError(null);
       if (items.length === 0) { setError("Agrega al menos un producto."); setGuardando(false); return; }
 
@@ -118,44 +102,23 @@ export default function Ventas() {
         }
       }
 
-      // 1) Asegurar cliente en colección "clientes"
-      const nombreCli = (cliente.nombre || "-").trim() || "-";
-      const docCli = (cliente.documento || "-").trim() || "-";
-      const clienteId = normalizarIdCliente(docCli);
-      const clienteRef = doc(db, "clientes", clienteId);
-      const cliSnap = await getDoc(clienteRef);
-      if (!cliSnap.exists()) {
-        await setDoc(clienteRef, {
-          nombre: nombreCli,
-          documento: docCli,
-          creadoEn: serverTimestamp()
-        });
-      } else {
-        // Opcional: actualizar nombre si vino diferente
-        const actual = cliSnap.data();
-        if (nombreCli && nombreCli !== actual?.nombre) {
-          await setDoc(clienteRef, { nombre: nombreCli }, { merge: true });
-        }
-      }
-
-      // 2) Crear venta con referencia a cliente
+      // Crear venta (en subcolección de la empresa)
       const venta = {
-        cliente: { nombre: nombreCli, documento: docCli }, // compatibilidad con tu factura
-        clienteId: `clientes/${clienteId}`,
+        cliente: { nombre: cliente.nombre || "-", documento: cliente.documento || "-" },
         items,
         total,
         fecha: serverTimestamp()
       };
-      const ref = await addDoc(collection(db, "ventas"), venta);
+      const ref = await addDoc(collection(db, "empresas", empresa.id, "ventas"), venta);
 
-      // 3) Descontar stock (simple)
+      // Descontar stock (simple)
       await Promise.all(items.map(async (it) => {
         const prod = productos.find(p => p.id === it.productoId);
         const nuevaCantidad = Number(prod.cantidad) - Number(it.cantidad);
-        await updateDoc(doc(db, "productos", it.productoId), { cantidad: nuevaCantidad });
+        await updateDoc(doc(db, "empresas", empresa.id, "productos", it.productoId), { cantidad: nuevaCantidad });
       }));
 
-      // 4) Navegar a factura
+      // Navegar a factura
       navigate(`/factura/${ref.id}`);
     } catch (e) {
       console.error(e);
@@ -167,28 +130,16 @@ export default function Ventas() {
 
   return (
     <div className="inv-root">
-      {/* Header con marca de empresa + acciones */}
       <header className="inv-header">
-        <div style={{ display:"flex", alignItems:"center", gap:12 }}>
-          {empresa?.logoUrl ? (
-            <img
-              src={empresa.logoUrl}
-              alt="Logo"
-              style={{ width:36, height:36, borderRadius:8, objectFit:"cover", border:"1px solid var(--border)" }}
-            />
-          ) : null}
-          <div>
-            <h1>{empresa?.nombre || "Ventas"}</h1>
-            <p className="inv-subtle">{empresa?.nit ? `NIT: ${empresa.nit}` : "Registra productos vendidos y genera la factura"}</p>
-          </div>
+        <div>
+          <h1>Ventas</h1>
+          <p className="inv-subtle">Registra productos vendidos y genera la factura</p>
         </div>
         <div className="header-actions">
           <button className="btn theme-toggle" onClick={toggle} aria-label="Cambiar tema">
             {theme === "dark" ? "☀️ Claro" : "🌙 Oscuro"}
           </button>
           <Link to="/" className="btn">← Inventario</Link>
-          <Link to="/clientes" className="btn">👥 Clientes</Link>
-          <Link to="/configuracion" className="btn">⚙️ Configuración</Link>
         </div>
       </header>
 
@@ -244,7 +195,7 @@ export default function Ventas() {
               </div>
             </div>
 
-            <div className="row" style={{ marginTop: 8, gap: 12, alignItems: "center" }}>
+            <div className="row" style={{ marginTop: 8 }}>
               <button className="btn" onClick={agregarItem}>➕ Agregar producto</button>
               {productoActual && (
                 <span className="inv-subtle">
@@ -278,6 +229,8 @@ export default function Ventas() {
                         <span>Cant: <b>{it.cantidad}</b></span>
                         <span>P. Unit: <b>${it.precioUnitario.toLocaleString()}</b></span>
                         <span>Subtotal: <b>${(it.cantidad*it.precioUnitario).toLocaleString()}</b></span>
+                        {/* Mostramos costo solo en la vista de venta para ti (no en la factura) */}
+                        <span style={{ opacity:.8 }}>Costo: <b>${Number(it.costoUnitario||0).toLocaleString()}</b></span>
                       </div>
                     </div>
                     <div className="product-actions">

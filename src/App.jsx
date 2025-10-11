@@ -11,143 +11,68 @@ import ClienteDetalle from "./pages/ClienteDetalle.jsx";
 import Login from "./pages/Login.jsx";
 import SignUp from "./pages/SignUp.jsx";
 import VerifyEmail from "./pages/VerifyEmail.jsx";
-import ResetPassword from "./pages/ResetPassword.jsx"; // 👈 NUEVA
+import RegistroVentas from "./pages/RegistroVentas.jsx";
+import Importar from "./pages/Importar.jsx";
 
 // Tenant / Auth
 import TenantProvider, { useTenant } from "./tenant/TenantProvider";
 
-// (opcional) estilos base
+// Offline banner
+import OfflineBanner from "./components/OfflineBanner.jsx";
+
 import "./pages/inventario.css";
 
-/** RUTA PROTEGIDA
- *  - Requiere usuario logueado
- *  - Requiere email verificado
- *  - Requiere empresa asignada
- */
+// ----- Rutas auxiliares -----
 function Protected({ children }) {
   const { user, empresa } = useTenant();
-
-  // Aún sin sesión -> a Login
   if (!user) return <Navigate to="/login" replace />;
-
-  // Sesión pero sin verificar email -> a Verificar
   if (!user.emailVerified) return <Navigate to="/verificar" replace />;
-
-  // Verificado pero sin empresa asignada -> mensaje
-  if (!empresa) {
+  if (!empresa?.id) {
     return (
       <div className="inv-root">
         <h2>Sin empresa asignada</h2>
-        <p className="inv-subtle">
-          Tu usuario no está asociado a ninguna empresa aún. Pide a un
-          administrador que te añada al array <code>usuarios</code> de su documento en
-          <code> empresas/{"{empresaId}"} </code>.
-        </p>
-        <p className="inv-subtle" style={{ marginTop: 8 }}>
-          (Si estás probando, crea la colección <code>empresas</code> y añade tu <code>uid</code> al campo
-          <code> usuarios </code> en un documento de empresa)
-        </p>
+        <p className="inv-subtle">Tu usuario no está asociado a ninguna empresa.</p>
       </div>
     );
   }
-
   return children;
 }
 
-/** SOLO PÚBLICAS
- * - Si ya hay sesión, redirige al Home
- */
 function PublicOnly({ children }) {
   const { user } = useTenant();
   if (user) return <Navigate to="/" replace />;
   return children;
 }
 
+// ----- App -----
 export default function App() {
   return (
     <TenantProvider>
-      <Routes>
-        {/* Rutas públicas */}
-        <Route
-          path="/login"
-          element={
-            <PublicOnly>
-              <Login />
-            </PublicOnly>
-          }
-        />
-        <Route
-          path="/registro"
-          element={
-            <PublicOnly>
-              <SignUp />
-            </PublicOnly>
-          }
-        />
-        <Route
-          path="/reset"
-          element={
-            <PublicOnly>
-              <ResetPassword />
-            </PublicOnly>
-          }
-        />
-        {/* Nota: /verificar debe estar accesible aunque NO haya sesión o no esté verificado */}
-        <Route path="/verificar" element={<VerifyEmail />} />
+      <>
+        <Routes>
+          {/* Públicas */}
+          <Route path="/login" element={<PublicOnly><Login /></PublicOnly>} />
+          <Route path="/registro" element={<PublicOnly><SignUp /></PublicOnly>} />
+          <Route path="/registro/:empresaId" element={<PublicOnly><SignUp /></PublicOnly>} />
+          <Route path="/verificar" element={<VerifyEmail />} />
 
-        {/* Rutas protegidas */}
-        <Route
-          path="/"
-          element={
-            <Protected>
-              <Inventario />
-            </Protected>
-          }
-        />
-        <Route
-          path="/ventas"
-          element={
-            <Protected>
-              <Ventas />
-            </Protected>
-          }
-        />
-        <Route
-          path="/factura/:id"
-          element={
-            <Protected>
-              <Factura />
-            </Protected>
-          }
-        />
-        <Route
-          path="/configuracion"
-          element={
-            <Protected>
-              <Configuracion />
-            </Protected>
-          }
-        />
-        <Route
-          path="/clientes"
-          element={
-            <Protected>
-              <Clientes />
-            </Protected>
-          }
-        />
-        <Route
-          path="/clientes/:id"
-          element={
-            <Protected>
-              <ClienteDetalle />
-            </Protected>
-          }
-        />
+          {/* Protegidas */}
+          <Route path="/" element={<Protected><Inventario /></Protected>} />
+          <Route path="/ventas" element={<Protected><Ventas /></Protected>} />
+          <Route path="/factura/:id" element={<Protected><Factura /></Protected>} />
+          <Route path="/configuracion" element={<Protected><Configuracion /></Protected>} />
+          <Route path="/clientes" element={<Protected><Clientes /></Protected>} />
+          <Route path="/clientes/:id" element={<Protected><ClienteDetalle /></Protected>} />
+          <Route path="/importar" element={<Protected><Importar /></Protected>} />
+          <Route path="/registro-ventas" element={<Protected><RegistroVentas /></Protected>} />
 
-        {/* Fallback */}
-        <Route path="*" element={<Navigate to="/" replace />} />
-      </Routes>
+          {/* Fallback */}
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+
+        {/* Banner de offline */}
+        <OfflineBanner />
+      </>
     </TenantProvider>
   );
 }

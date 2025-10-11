@@ -2,7 +2,7 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { sendPasswordResetEmail } from "firebase/auth";
-import { auth } from "../../firebase";
+import { auth } from "../../firebaseClient";
 import "./inventario.css";
 
 export default function ResetPassword() {

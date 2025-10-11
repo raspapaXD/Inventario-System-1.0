@@ -1,126 +1,188 @@
 // src/tenant/TenantProvider.jsx
-import { createContext, useContext, useEffect, useState } from "react";
-import { auth, db } from "../../firebase";
-
-// Auth
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { auth, db } from "../../firebaseClient.js";
 import {
   onAuthStateChanged,
   signInWithEmailAndPassword,
   signOut,
   createUserWithEmailAndPassword,
-  sendEmailVerification,
 } from "firebase/auth";
-
-// Firestore
 import {
-  doc,
-  getDoc,
-  setDoc,
-  addDoc,
-  collection,
-  serverTimestamp,
+  doc, getDoc, runTransaction, setDoc, deleteDoc
 } from "firebase/firestore";
+import { getPersistentDeviceId } from "../utils/deviceId";
 
 const TenantContext = createContext();
-export function useTenant() {
-  return useContext(TenantContext);
-}
+export function useTenant() { return useContext(TenantContext); }
 
-// Helper: crea una empresa por defecto y vincula el usuario
-async function ensureEmpresaParaUsuario(db, uid) {
-  // 1) Crear empresa
-  const empRef = await addDoc(collection(db, "empresas"), {
-    nombre: "Mi Empresa",
-    nit: "",
-    logoUrl: "",
-    usuarios: [uid],
-    creadoEn: serverTimestamp(),
-  });
-  // 2) Mapear usuario -> empresa
-  await setDoc(doc(db, "usuarios", uid), {
-    empresaId: empRef.id,
-    rol: "admin",
-    createdAt: serverTimestamp(),
-  });
-  return empRef.id;
-}
+/**
+ * Estructura usada en Firestore:
+ * empresas/{empresaId} {
+ *   maxDispositivos: number (default 3),
+ *   devicesCount: number (contador)
+ * }
+ * empresas/{empresaId}/devices/{deviceId} {
+ *   deviceId, uid, userEmail, userAgent, createdAt, lastSeen
+ * }
+ *
+ * Usuarios por empresa: como ya tienes, mediante /usuarios/{uid} -> empresaId
+ */
 
 export default function TenantProvider({ children }) {
   const [user, setUser] = useState(null);
   const [empresa, setEmpresa] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [deviceError, setDeviceError] = useState(null); // para mostrar bloqueos por límite
 
-  // Observa la sesión y garantiza que el usuario tenga empresa asignada
-  useEffect(() => {
-    const unsub = onAuthStateChanged(auth, async (u) => {
-      setUser(u);
+  const deviceId = useMemo(() => getPersistentDeviceId(), []);
 
-      if (!u) {
-        setEmpresa(null);
-        setLoading(false);
+  // --- Helpers Firestore
+  const getEmpresaIdForUser = async (uid) => {
+    const snap = await getDoc(doc(db, "usuarios", uid));
+    if (!snap.exists()) return null;
+    const data = snap.data();
+    return data?.empresaId || null;
+  };
+
+  // Registra el dispositivo con transacción y contador
+  const registerCurrentDevice = async (empresaId, u) => {
+    const empresaRef = doc(db, "empresas", empresaId);
+    const deviceRef  = doc(db, "empresas", empresaId, "devices", deviceId);
+
+    await runTransaction(db, async (tx) => {
+      const [empresaSnap, deviceSnap] = await Promise.all([
+        tx.get(empresaRef),
+        tx.get(deviceRef),
+      ]);
+
+      if (!empresaSnap.exists()) {
+        throw new Error("EMPRESA_NO_EXISTE");
+      }
+
+      const empresaData = empresaSnap.data() || {};
+      const max = Number(empresaData.maxDispositivos ?? 3);
+      const count = Number(empresaData.devicesCount ?? 0);
+
+      // Si este device ya está, solo actualiza lastSeen y listo (no consume cupo)
+      if (deviceSnap.exists()) {
+        tx.set(deviceRef, {
+          deviceId,
+          uid: u.uid,
+          userEmail: u.email || "",
+          userAgent: navigator.userAgent.slice(0, 150),
+          lastSeen: new Date().toISOString(),
+        }, { merge: true });
         return;
       }
 
-      try {
-        // Busca el documento usuarios/{uid}
-        const uSnap = await getDoc(doc(db, "usuarios", u.uid));
-        let empresaId = uSnap.exists() ? uSnap.data()?.empresaId : null;
-
-        // Fallback: si no hay empresa, la creamos una sola vez
-        if (!empresaId) {
-          empresaId = await ensureEmpresaParaUsuario(db, u.uid);
-        }
-
-        // Cargar datos de la empresa
-        const eSnap = await getDoc(doc(db, "empresas", empresaId));
-        setEmpresa(eSnap.exists() ? { id: empresaId, ...eSnap.data() } : null);
-      } catch (e) {
-        console.error("Error cargando/creando empresa:", e);
-        setEmpresa(null);
+      // Si no existe, verifica cupo
+      if (count >= max) {
+        throw new Error("DEVICE_LIMIT");
       }
 
+      // Crea device + incrementa contador
+      tx.set(deviceRef, {
+        deviceId,
+        uid: u.uid,
+        userEmail: u.email || "",
+        userAgent: navigator.userAgent.slice(0, 150),
+        createdAt: new Date().toISOString(),
+        lastSeen: new Date().toISOString(),
+      });
+      tx.set(empresaRef, { devicesCount: count + 1 }, { merge: true });
+    });
+  };
+
+  // Desvincular este dispositivo (para botón de Configuración o al cerrar sesión)
+  const unlinkCurrentDevice = async (empresaId) => {
+    if (!empresaId) return;
+    const empresaRef = doc(db, "empresas", empresaId);
+    const deviceRef  = doc(db, "empresas", empresaId, "devices", deviceId);
+
+    await runTransaction(db, async (tx) => {
+      const [empresaSnap, deviceSnap] = await Promise.all([
+        tx.get(empresaRef),
+        tx.get(deviceRef),
+      ]);
+      if (!empresaSnap.exists()) return;
+
+      const data = empresaSnap.data() || {};
+      const count = Number(data.devicesCount ?? 0);
+
+      if (deviceSnap.exists()) {
+        tx.delete(deviceRef);
+        tx.set(empresaRef, { devicesCount: Math.max(0, count - 1) }, { merge: true });
+      }
+    });
+  };
+
+  // --- Auth watcher
+  useEffect(() => {
+    const unsub = onAuthStateChanged(auth, async (u) => {
+      setUser(u);
+      setDeviceError(null);
+
+      if (u) {
+        const empresaId = await getEmpresaIdForUser(u.uid);
+        if (!empresaId) {
+          setEmpresa(null);
+          setLoading(false);
+          return;
+        }
+        // Carga empresa
+        const eSnap = await getDoc(doc(db, "empresas", empresaId));
+        const eData = eSnap.exists() ? { id: empresaId, ...eSnap.data() } : { id: empresaId };
+
+        // Asegura defaults
+        eData.maxDispositivos = Number(eData.maxDispositivos ?? 3);
+        eData.devicesCount = Number(eData.devicesCount ?? 0);
+
+        try {
+          await registerCurrentDevice(empresaId, u);
+          setEmpresa(eData);
+        } catch (err) {
+          console.error(err);
+          if (String(err.message).includes("DEVICE_LIMIT")) {
+            setDeviceError("Esta empresa alcanzó el límite de dispositivos activos. Pide a un administrador liberar un cupo.");
+            // Puedes cerrar sesión si quieres bloquear totalmente:
+            // await signOut(auth);
+          }
+          setEmpresa(eData); // mantenemos empresa para mostrar el mensaje en UI
+        }
+      } else {
+        setEmpresa(null);
+      }
       setLoading(false);
     });
 
     return () => unsub();
-  }, []);
+  }, [deviceId]);
 
-  // ---------- APIs expuestas ----------
-  const login = (email, password) =>
-    signInWithEmailAndPassword(auth, email, password);
+  // --- API expuesta
+  const login  = (email, password) => signInWithEmailAndPassword(auth, email, password);
+  const signup = (email, password) => createUserWithEmailAndPassword(auth, email, password);
 
-  // Registro: crea usuario, envía verificación y crea empresa por defecto
-  const signup = async (email, password) => {
-    // 1) Crear usuario
-    const { user } = await createUserWithEmailAndPassword(auth, email, password);
-
-    // 2) Enviar verificación (opcional, recomendado)
+  const logout = async () => {
     try {
-      auth.languageCode = "es";
-      await sendEmailVerification(user, {
-        url: `${window.location.origin}/login`, // destino al confirmar
-        handleCodeInApp: false,
-      });
+      if (empresa?.id) {
+        await unlinkCurrentDevice(empresa.id);
+      }
     } catch (e) {
-      console.warn("No se pudo enviar verificación:", e);
+      console.warn("No se pudo desvincular el dispositivo al cerrar sesión:", e);
     }
-
-    // 3) Crear empresa por defecto y mapear usuario
-    await ensureEmpresaParaUsuario(db, user.uid);
-
-    return user;
+    await signOut(auth);
   };
-
-  const logout = () => signOut(auth);
 
   const value = {
     user,
-    currentUser: user, // alias
     empresa,
+    loading,
     login,
     signup,
     logout,
-    loading,
+    deviceError,              // <- para mostrar mensaje si se superó el límite
+    unlinkCurrentDevice,      // <- para botón en Configuración
+    deviceId,                 // info útil
   };
 
   return (
@@ -129,3 +191,4 @@ export default function TenantProvider({ children }) {
     </TenantContext.Provider>
   );
 }
+

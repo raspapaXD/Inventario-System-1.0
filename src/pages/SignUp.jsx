@@ -1,12 +1,16 @@
 // src/pages/SignUp.jsx
-import { useState } from "react";
-import { useNavigate, Link } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { useNavigate, Link, useParams } from "react-router-dom";
 import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
+
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { app as firebaseApp } from "../../firebaseClient.js"; // exporta 'app' en tu firebase.js si no lo tenías
 
 export default function SignUp() {
   const { signup } = useTenant();
   const navigate = useNavigate();
+  const { empresaId } = useParams(); // viene de /registro/:empresaId (o undefined en /registro)
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -16,48 +20,35 @@ export default function SignUp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
+  useEffect(()=>{ setError(null); },[email,password,password2]);
+
   const handleSubmit = async (e) => {
     e.preventDefault();
-
     if (password !== password2) {
       setError("Las contraseñas no coinciden.");
       return;
     }
-
-    if (password.length < 6) {
-      setError("La contraseña debe tener al menos 6 caracteres.");
-      return;
-    }
-
     try {
       setError(null);
       setLoading(true);
-      await signup(email, password);
-      navigate("/verificar"); // mejor ir a verificar
+      const cred = await signup(email, password);
+
+      // Si el link traía empresaId, pedir unirse a esa empresa (límite 3)
+      if (empresaId) {
+        const functions = getFunctions(firebaseApp);
+        const joinCompany = httpsCallable(functions, "joinCompany");
+        await joinCompany({ empresaId });
+      }
+
+      // A donde quieres redirigir: inventario o verificar email
+      navigate("/");
     } catch (err) {
       console.error(err);
-      let msg = "No se pudo registrar la cuenta.";
-      if (err?.code) {
-        switch (err.code) {
-          case "auth/weak-password":
-            msg = "La contraseña es muy corta. Debe tener al menos 6 caracteres.";
-            break;
-          case "auth/email-already-in-use":
-            msg = "Ese correo ya está registrado. Intenta iniciar sesión.";
-            break;
-          case "auth/invalid-email":
-            msg = "El correo no es válido.";
-            break;
-          case "auth/network-request-failed":
-            msg = "Problema de red. Revisa tu conexión.";
-            break;
-          case "auth/operation-not-allowed":
-            msg = "El método Email/Password no está habilitado en Firebase.";
-            break;
-          default:
-            msg = `Error: ${err.code}`;
-        }
-      }
+      // Errores conocidos
+      const msg =
+        err?.message?.includes("3 usuarios")
+          ? "Esta empresa ya alcanzó el límite de 3 usuarios."
+          : "No se pudo registrar la cuenta.";
       setError(msg);
     } finally {
       setLoading(false);
@@ -68,7 +59,10 @@ export default function SignUp() {
     <div className="inv-root" style={{ display: "grid", placeItems: "center" }}>
       <div className="card" style={{ maxWidth: 420, width: "100%" }}>
         <div className="card-header">
-          <h2>Crear cuenta</h2>
+          <h2>Crear cuenta {empresaId ? " (invitación)" : ""}</h2>
+          {empresaId && (
+            <p className="inv-subtle">Te unirás a la empresa: <code>{empresaId}</code></p>
+          )}
         </div>
         <div className="card-body">
           <form onSubmit={handleSubmit} className="form-grid">
@@ -96,11 +90,7 @@ export default function SignUp() {
                   autoComplete="new-password"
                   style={{ flex: 1 }}
                 />
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setShow1((s) => !s)}
-                >
+                <button type="button" className="btn" onClick={() => setShow1(s => !s)}>
                   {show1 ? "Ocultar" : "Mostrar"}
                 </button>
               </div>
@@ -118,11 +108,7 @@ export default function SignUp() {
                   autoComplete="new-password"
                   style={{ flex: 1 }}
                 />
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={() => setShow2((s) => !s)}
-                >
+                <button type="button" className="btn" onClick={() => setShow2(s => !s)}>
                   {show2 ? "Ocultar" : "Mostrar"}
                 </button>
               </div>
@@ -135,11 +121,7 @@ export default function SignUp() {
             )}
 
             <div className="card-footer" style={{ gridColumn: "1 / -1" }}>
-              <button
-                type="submit"
-                className="btn btn-primary"
-                disabled={loading}
-              >
+              <button type="submit" className="btn btn-primary" disabled={loading}>
                 {loading ? "Registrando..." : "Crear cuenta"}
               </button>
               <Link to="/login" className="btn">Ya tengo cuenta</Link>
