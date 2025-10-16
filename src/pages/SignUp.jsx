@@ -5,12 +5,13 @@ import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
 import { getFunctions, httpsCallable } from "firebase/functions";
-import { app as firebaseApp } from "../../firebaseClient.js"; // exporta 'app' en tu firebase.js si no lo tenías
+import { auth, app as firebaseApp } from "../../firebaseClient"; // <— ajusta si tu archivo se llama distinto
+import { sendEmailVerification } from "firebase/auth";
 
 export default function SignUp() {
   const { signup } = useTenant();
   const navigate = useNavigate();
-  const { empresaId } = useParams(); // viene de /registro/:empresaId (o undefined en /registro)
+  const { empresaId } = useParams();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -20,7 +21,7 @@ export default function SignUp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  useEffect(()=>{ setError(null); },[email,password,password2]);
+  useEffect(() => { setError(null); }, [email, password, password2]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -29,26 +30,45 @@ export default function SignUp() {
       return;
     }
     try {
-      setError(null);
       setLoading(true);
+      setError(null);
+
+      // 1) Crear cuenta
       const cred = await signup(email, password);
 
-      // Si el link traía empresaId, pedir unirse a esa empresa (límite 3)
+      // 2) Enviar verificación
+      await sendEmailVerification(cred.user);
+
+      // 3) Si viene empresaId en el link, unir a la empresa
       if (empresaId) {
         const functions = getFunctions(firebaseApp);
         const joinCompany = httpsCallable(functions, "joinCompany");
         await joinCompany({ empresaId });
       }
 
-      // A donde quieres redirigir: inventario o verificar email
-      navigate("/");
+      // 4) Llevar a la pantalla de verificación
+      navigate("/verificar");
     } catch (err) {
       console.error(err);
-      // Errores conocidos
-      const msg =
-        err?.message?.includes("3 usuarios")
-          ? "Esta empresa ya alcanzó el límite de 3 usuarios."
-          : "No se pudo registrar la cuenta.";
+      // Manejo fino de errores de Auth
+      const code = err?.code || "";
+      if (code === "auth/email-already-in-use") {
+        setError("Ese correo ya tiene una cuenta. Inicia sesión o recupera tu contraseña.");
+        return;
+      }
+      if (code === "auth/weak-password") {
+        setError("La contraseña es demasiado débil.");
+        return;
+      }
+      if (code === "auth/invalid-email") {
+        setError("El correo no es válido.");
+        return;
+      }
+
+      // Errores de función (unirse a empresa) o genéricos
+      const msg = err?.message?.includes("3 usuarios")
+        ? "Esta empresa ya alcanzó el límite de 3 usuarios."
+        : "No se pudo registrar la cuenta.";
       setError(msg);
     } finally {
       setLoading(false);
@@ -61,9 +81,12 @@ export default function SignUp() {
         <div className="card-header">
           <h2>Crear cuenta {empresaId ? " (invitación)" : ""}</h2>
           {empresaId && (
-            <p className="inv-subtle">Te unirás a la empresa: <code>{empresaId}</code></p>
+            <p className="inv-subtle">
+              Te unirás a la empresa: <code>{empresaId}</code>
+            </p>
           )}
         </div>
+
         <div className="card-body">
           <form onSubmit={handleSubmit} className="form-grid">
             <div className="form-field" style={{ gridColumn: "1 / -1" }}>
@@ -125,6 +148,7 @@ export default function SignUp() {
                 {loading ? "Registrando..." : "Crear cuenta"}
               </button>
               <Link to="/login" className="btn">Ya tengo cuenta</Link>
+              <Link to="/login" className="btn">¿Olvidaste tu contraseña?</Link>
             </div>
           </form>
         </div>
