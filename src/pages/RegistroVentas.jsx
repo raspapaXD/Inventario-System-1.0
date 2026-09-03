@@ -1,23 +1,33 @@
-/// src/pages/RegistroVentas.jsx
+// src/pages/RegistroVentas.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { db } from "../../firebaseClient";
 import {
-  collection, query, where, orderBy, getDocs, limit
+  collection,
+  query,
+  where,
+  orderBy,
+  getDocs,
+  limit
 } from "firebase/firestore";
 import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
+/* =======================
+   Tema
+======================= */
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") || "dark");
   useEffect(() => {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
-  const toggle = () => setTheme(t => (t === "dark" ? "light" : "dark"));
-  return { theme, toggle };
+  return { theme, toggle: () => setTheme(t => (t === "dark" ? "light" : "dark")) };
 }
 
+/* =======================
+   Página
+======================= */
 export default function RegistroVentas() {
   const { theme, toggle } = useTheme();
   const { empresa } = useTenant();
@@ -34,185 +44,134 @@ export default function RegistroVentas() {
   const [agrupado, setAgrupado] = useState(false);
   const [ordenDesc, setOrdenDesc] = useState(true);
 
-  // Rango de fechas
+  /* =======================
+     Rango de fechas
+  ======================= */
   const rango = useMemo(() => {
-    const start = desde ? new Date(`${desde}T00:00:00`) : null;
-    const end   = hasta ? new Date(`${hasta}T23:59:59.999`) : null;
-    return { start, end };
+    return {
+      start: desde ? new Date(`${desde}T00:00:00`) : null,
+      end: hasta ? new Date(`${hasta}T23:59:59.999`) : null
+    };
   }, [desde, hasta]);
 
-  // Normalizador
-  const normalizaVenta = (d) => {
-    const data = d.data();
-    let f = data.fecha;
-    if (f?.toDate) f = f.toDate();
-    else if (typeof f === "number" || typeof f === "string") f = new Date(f);
-    else f = null;
+  /* =======================
+     Normalizador de ventas
+  ======================= */
+  const normalizarVenta = (doc) => {
+    const data = doc.data();
 
-    const items = data.items || data.productos || [];
+    let fecha = data.fecha;
+    if (fecha?.toDate) fecha = fecha.toDate();
+    else if (fecha) fecha = new Date(fecha);
+    else fecha = null;
+
+    const items = data.items || [];
     const total = Number(
       data.total ??
-      items.reduce((acc, it) => acc + Number(it.cantidad||0)*Number(it.precioUnitario||0), 0)
+      items.reduce(
+        (acc, it) =>
+          acc + Number(it.cantidad || 0) * Number(it.precioUnitario || 0),
+        0
+      )
     );
 
-    const clienteNombre =
-      (data.cliente && typeof data.cliente === "object" ? data.cliente.nombre : data.cliente) ||
-      data.clienteNombre || "Consumidor final";
-    const clienteDoc =
-      (data.cliente && typeof data.cliente === "object" ? data.cliente.documento : data.documento) || "";
-
     return {
-      id: d.id,
-      fecha: f,
+      id: doc.id,
+      fecha,
       total,
       items,
-      clienteNombre,
-      clienteDoc
+      clienteNombre: data.cliente?.nombre || "Consumidor final",
+      clienteDoc: data.cliente?.documento || ""
     };
   };
 
-  // Carga con múltiples “plan B”
+  /* =======================
+     Cargar ventas
+  ======================= */
   useEffect(() => {
     (async () => {
+      if (!empresa?.id) return;
+
       setCargando(true);
       setError(null);
-      setVentas([]);
 
-      if (!empresa?.id) { setCargando(false); return; }
+      const ventasRef = collection(db, "empresas", empresa.id, "ventas");
 
-      const subcol = collection(db, "empresas", empresa.id, "ventas");
-
-      // 1) Intento ideal: rango + orderBy (no necesita índice compuesto)
       try {
-        const cons = [];
-        if (rango.start) cons.push(where("fecha", ">=", rango.start));
-        if (rango.end)   cons.push(where("fecha", "<=", rango.end));
-        cons.push(orderBy("fecha", ordenDesc ? "desc" : "asc"));
-        const qy = query(subcol, ...cons);
-        const snap = await getDocs(qy);
-        if (!snap.empty) {
-          setVentas(snap.docs.map(normalizaVenta));
-          setCargando(false);
-          return;
-        }
-      } catch (e) {
-        console.error("Q1 (rango+orderBy) falló:", e);
-      }
+        const filtros = [];
+        if (rango.start) filtros.push(where("fecha", ">=", rango.start));
+        if (rango.end) filtros.push(where("fecha", "<=", rango.end));
+        filtros.push(orderBy("fecha", ordenDesc ? "desc" : "asc"));
 
-      // 2) Plan B: solo orderBy + limit (evita algunos índices)
-      try {
-        const qy = query(subcol, orderBy("fecha", ordenDesc ? "desc" : "asc"), limit(200));
-        const snap = await getDocs(qy);
-        if (!snap.empty) {
-          setVentas(snap.docs.map(normalizaVenta));
-          setCargando(false);
-          return;
-        }
-      } catch (e) {
-        console.error("Q2 (solo orderBy) falló:", e);
-      }
+        const q = query(ventasRef, ...filtros);
+        const snap = await getDocs(q);
 
-      // 3) Plan C: sin orderBy (último recurso)
-      try {
-        const snap = await getDocs(subcol);
-        if (!snap.empty) {
-          const list = snap.docs.map(normalizaVenta);
-          // ordenamos en memoria
-          list.sort((a,b) => (a.fecha?.getTime()||0) - (b.fecha?.getTime()||0));
-          if (ordenDesc) list.reverse();
-          setVentas(list);
-          setCargando(false);
-          return;
-        }
+        setVentas(snap.docs.map(normalizarVenta));
       } catch (e) {
-        console.error("Q3 (sin orderBy) falló:", e);
+        console.error(e);
+        setError("No se pudieron cargar las ventas.");
+      } finally {
+        setCargando(false);
       }
-
-      // 4) Fallback a colección raíz por si hay ventas antiguas allí
-      try {
-        const cons = [];
-        if (rango.start) cons.push(where("fecha", ">=", rango.start));
-        if (rango.end)   cons.push(where("fecha", "<=", rango.end));
-        cons.push(orderBy("fecha", ordenDesc ? "desc" : "asc"));
-        const qy = query(collection(db, "ventas"), ...cons);
-        const snap = await getDocs(qy);
-        if (!snap.empty) {
-          setVentas(snap.docs.map(normalizaVenta));
-          setCargando(false);
-          return;
-        }
-      } catch (e) {
-        console.error("Q4 (raíz rango+orderBy) falló:", e);
-      }
-
-      setCargando(false);
-      // Nota: no marcamos error si simplemente no hay ventas
     })();
   }, [empresa?.id, rango.start, rango.end, ordenDesc]);
 
-  // Filtro por cliente
+  /* =======================
+     Filtros en memoria
+  ======================= */
   const ventasFiltradas = useMemo(() => {
-    const t = (qCliente || "").trim().toLowerCase();
+    const t = qCliente.trim().toLowerCase();
     if (!t) return ventas;
+
     return ventas.filter(v =>
-      (v.clienteNombre||"").toLowerCase().includes(t) ||
-      (v.clienteDoc||"").toLowerCase().includes(t)
+      v.clienteNombre.toLowerCase().includes(t) ||
+      (v.clienteDoc || "").toLowerCase().includes(t)
     );
   }, [ventas, qCliente]);
 
-  const conteo = ventasFiltradas.length;
-  const suma = ventasFiltradas.reduce((acc, v) => acc + Number(v.total||0), 0);
+  const totalVentas = ventasFiltradas.reduce((acc, v) => acc + v.total, 0);
 
-  const grupos = useMemo(() => {
-    if (!agrupado) return null;
-    const map = new Map();
-    for (const v of ventasFiltradas) {
-      const key = `${v.clienteNombre}||${v.clienteDoc||""}`;
-      if (!map.has(key)) map.set(key, []);
-      map.get(key).push(v);
-    }
-    for (const arr of map.values()) {
-      arr.sort((a,b) => (a.fecha?.getTime()||0) - (b.fecha?.getTime()||0));
-      if (ordenDesc) arr.reverse();
-    }
-    return Array.from(map.entries()).map(([k, arr]) => {
-      const [nombre, documento] = k.split("||");
-      const totalGrupo = arr.reduce((acc,v)=>acc+Number(v.total||0),0);
-      return { nombre, documento, total: totalGrupo, ventas: arr };
-    });
-  }, [agrupado, ventasFiltradas, ordenDesc]);
-
+  /* =======================
+     Exportar CSV
+  ======================= */
   const exportarCSV = () => {
-    const rows = [["ID","Fecha","Cliente","Documento","Items","Total"]];
-    for (const v of ventasFiltradas) {
+    const rows = [["ID", "Fecha", "Cliente", "Documento", "Items", "Total"]];
+
+    ventasFiltradas.forEach(v => {
       rows.push([
         v.id,
-        v.fecha ? v.fecha.toLocaleString() : "",
+        v.fecha?.toLocaleString() || "",
         v.clienteNombre,
-        v.clienteDoc || "",
-        String(v.items?.length || 0),
-        String(v.total || 0),
+        v.clienteDoc,
+        v.items.length,
+        v.total
       ]);
-    }
-    const csv = rows.map(r => r.map(x => `"${(x??"").toString().replace(/"/g,'""')}"`).join(",")).join("\n");
+    });
+
+    const csv = rows.map(r => r.join(",")).join("\n");
     const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
     const url = URL.createObjectURL(blob);
+
     const a = document.createElement("a");
     a.href = url;
-    a.download = `ventas_${desde || ""}_${hasta || ""}.csv`;
-    document.body.appendChild(a);
+    a.download = `ventas_${desde}_${hasta}.csv`;
     a.click();
-    a.remove();
+
     URL.revokeObjectURL(url);
   };
 
+  /* =======================
+     Render
+  ======================= */
   return (
     <div className="inv-root">
       <header className="inv-header">
         <div>
           <h1>Registro de ventas</h1>
           <p className="inv-subtle">
-            {cargando ? "Cargando…" : `Mostrando ${conteo} venta(s) • Total $${suma.toLocaleString()}`}
+            {cargando
+              ? "Cargando…"
+              : `${ventasFiltradas.length} ventas • Total $${totalVentas.toLocaleString()}`}
           </p>
         </div>
         <div className="header-actions">
@@ -223,101 +182,32 @@ export default function RegistroVentas() {
         </div>
       </header>
 
-      <section className="inv-toolbar" style={{ rowGap: 10 }}>
-        <div className="form-field">
-          <label>Desde</label>
-          <input type="date" value={desde} onChange={(e)=>setDesde(e.target.value)} />
-        </div>
-        <div className="form-field">
-          <label>Hasta</label>
-          <input type="date" value={hasta} onChange={(e)=>setHasta(e.target.value)} />
-        </div>
-
-        <div className="input-with-icon" style={{ maxWidth: 320 }}>
-          <span className="icon">👤</span>
-          <input
-            type="text"
-            placeholder="Buscar por cliente o documento…"
-            value={qCliente}
-            onChange={(e)=>setQCliente(e.target.value)}
-          />
-        </div>
-
-        <label className="checkbox">
-          <input type="checkbox" checked={agrupado} onChange={(e)=>setAgrupado(e.target.checked)} />
-          <span>Agrupar por cliente</span>
-        </label>
-
-        <label className="checkbox">
-          <input type="checkbox" checked={ordenDesc} onChange={(e)=>setOrdenDesc(e.target.checked)} />
-          <span>Más recientes primero</span>
-        </label>
-
+      <section className="inv-toolbar">
+        <input type="date" value={desde} onChange={e => setDesde(e.target.value)} />
+        <input type="date" value={hasta} onChange={e => setHasta(e.target.value)} />
+        <input
+          placeholder="Buscar cliente…"
+          value={qCliente}
+          onChange={e => setQCliente(e.target.value)}
+        />
         <button className="btn" onClick={exportarCSV}>⬇️ Exportar CSV</button>
       </section>
 
       <section className="inv-grid" style={{ gridTemplateColumns: "1fr" }}>
         <div className="card">
-          <div className="card-header"><h2>Ventas</h2></div>
           <div className="card-body">
-            {ventasFiltradas.length === 0 && !cargando ? (
-              <p className="inv-subtle">No hay ventas en el rango o con ese filtro.</p>
-            ) : (
-              <>
-                {!agrupado ? (
-                  <ul className="product-list">
-                    {ventasFiltradas.map((v) => (
-                      <li className="product-item" key={v.id} style={{ gridTemplateColumns: "1fr auto" }}>
-                        <div className="product-info">
-                          <div className="product-title-row" style={{ justifyContent:"space-between" }}>
-                            <strong>Factura #{v.id.slice(0,8).toUpperCase()}</strong>
-                            <span className="inv-subtle">{v.fecha ? v.fecha.toLocaleString() : "—"}</span>
-                          </div>
-                          <div className="product-meta">
-                            <span>Cliente: <b>{v.clienteNombre}</b></span>
-                            {v.clienteDoc ? <span>Doc: <b>{v.clienteDoc}</b></span> : null}
-                            <span>Ítems: <b>{v.items?.length || 0}</b></span>
-                            <span>Total: <b>${Number(v.total||0).toLocaleString()}</b></span>
-                          </div>
-                        </div>
-                        <div className="product-actions">
-                          <Link className="btn btn-small" to={`/factura/${v.id}`}>Ver factura</Link>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="category-groups">
-                    {grupos?.map((g) => (
-                      <div className="category-block" key={`${g.nombre}-${g.documento}`}>
-                        <div className="category-title">
-                          {g.nombre} {g.documento ? `• ${g.documento}` : ""} — Total: ${g.total.toLocaleString()}
-                        </div>
-                        <ul className="product-list">
-                          {g.ventas.map((v) => (
-                            <li className="product-item" key={v.id} style={{ gridTemplateColumns: "1fr auto" }}>
-                              <div className="product-info">
-                                <div className="product-title-row" style={{ justifyContent:"space-between" }}>
-                                  <strong>Factura #{v.id.slice(0,8).toUpperCase()}</strong>
-                                  <span className="inv-subtle">{v.fecha ? v.fecha.toLocaleString() : "—"}</span>
-                                </div>
-                                <div className="product-meta">
-                                  <span>Ítems: <b>{v.items?.length || 0}</b></span>
-                                  <span>Total: <b>${Number(v.total||0).toLocaleString()}</b></span>
-                                </div>
-                              </div>
-                              <div className="product-actions">
-                                <Link className="btn btn-small" to={`/factura/${v.id}`}>Ver factura</Link>
-                              </div>
-                            </li>
-                          ))}
-                        </ul>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </>
-            )}
+            {ventasFiltradas.map(v => (
+              <div key={v.id} className="product-item">
+                <strong>Factura #{v.id.slice(0, 8)}</strong>
+                <div className="inv-subtle">
+                  {v.fecha?.toLocaleString()} — {v.clienteNombre}
+                </div>
+                <div>Total: ${v.total.toLocaleString()}</div>
+                <Link className="btn btn-small" to={`/factura/${v.id}`}>
+                  Ver factura
+                </Link>
+              </div>
+            ))}
           </div>
         </div>
       </section>

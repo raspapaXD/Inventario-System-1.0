@@ -1,29 +1,52 @@
 import { useEffect, useMemo, useState } from "react";
-import { db } from "../../firebaseClient";
-import { collection, getDocs, doc, getDoc, query, orderBy, where } from "firebase/firestore";
+import { db } from "../../firebaseClient.js";
+import { collection, getDocs } from "firebase/firestore";
 import { Link } from "react-router-dom";
+import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
 export default function Clientes() {
+  const { empresa } = useTenant();
+
+  const clientesCol = useMemo(() => {
+    if (!empresa?.id) return null;
+    return collection(db, "empresas", empresa.id, "clientes");
+  }, [empresa?.id]);
+
   const [clientes, setClientes] = useState([]);
-  const [ventas, setVentas] = useState([]); // opcional si quieres métricas globales
   const [qStr, setQStr] = useState("");
+  const [error, setError] = useState("");
 
   useEffect(() => {
     (async () => {
-      const cs = await getDocs(collection(db, "clientes"));
-      setClientes(cs.docs.map(d=>({ id:d.id, ...d.data() })));
+      if (!clientesCol) return;
+      try {
+        setError("");
+        const snap = await getDocs(clientesCol);
+        setClientes(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+      } catch (e) {
+        console.error(e);
+        setError("No se pudieron cargar los clientes (permisos o conexión).");
+      }
     })();
-  }, []);
+  }, [clientesCol]);
 
   const filtrados = useMemo(() => {
     const t = qStr.trim().toLowerCase();
     if (!t) return clientes;
     return clientes.filter(c =>
-      (c.nombre||"").toLowerCase().includes(t) ||
-      (c.documento||"").toLowerCase().includes(t)
+      (c.nombre || "").toLowerCase().includes(t) ||
+      (c.documento || "").toLowerCase().includes(t)
     );
   }, [clientes, qStr]);
+
+  if (!empresa?.id) {
+    return (
+      <div className="inv-root">
+        <header className="inv-header"><h1>Cargando empresa…</h1></header>
+      </div>
+    );
+  }
 
   return (
     <div className="inv-root">
@@ -52,6 +75,7 @@ export default function Clientes() {
         <div className="card">
           <div className="card-header"><h2>Listado</h2></div>
           <div className="card-body">
+            {error && <div className="toast toast-error" style={{position:"static"}}>{error}</div>}
             {filtrados.length === 0 ? (
               <p className="inv-subtle">Sin clientes coincidentes.</p>
             ) : (

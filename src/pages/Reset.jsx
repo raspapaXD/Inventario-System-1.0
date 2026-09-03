@@ -1,29 +1,27 @@
-// src/pages/ResetPassword.jsx
+// src/pages/Reset.jsx
 import { useState } from "react";
 import { Link } from "react-router-dom";
 import { sendPasswordResetEmail } from "firebase/auth";
-import { auth } from "../../firebaseClient";
+import { auth } from "../../firebaseClient.js";
 import "./inventario.css";
 
-export default function ResetPassword() {
+export default function Reset() {
   const [email, setEmail] = useState("");
-  const [ok, setOk] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [err, setErr] = useState(null);
+  const [sending, setSending] = useState(false);
+  const [msg, setMsg] = useState("");
 
-  const handleSubmit = async (e) => {
+  const onSubmit = async (e) => {
     e.preventDefault();
-    setErr(null);
-    setOk(false);
     try {
-      setLoading(true);
+      setSending(true);
+      setMsg("");
       await sendPasswordResetEmail(auth, email);
-      setOk(true);
-    } catch (error) {
-      console.error(error);
-      setErr("No se pudo enviar el correo de restablecimiento.");
+      setMsg("Te enviamos un correo para restablecer tu contraseña. Revisa tu bandeja y spam.");
+    } catch (e) {
+      console.error(e);
+      setMsg("No pudimos enviar el correo. Verifica el email.");
     } finally {
-      setLoading(false);
+      setSending(false);
     }
   };
 
@@ -32,9 +30,10 @@ export default function ResetPassword() {
       <div className="card" style={{ maxWidth: 420, width: "100%" }}>
         <div className="card-header">
           <h2>Restablecer contraseña</h2>
+          <p className="inv-subtle">Ingresa tu correo y te enviaremos un enlace.</p>
         </div>
         <div className="card-body">
-          <form onSubmit={handleSubmit} className="form-grid">
+          <form onSubmit={onSubmit} className="form-grid">
             <div className="form-field" style={{ gridColumn: "1 / -1" }}>
               <label>Email</label>
               <input
@@ -43,25 +42,21 @@ export default function ResetPassword() {
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
+                autoComplete="username"
               />
             </div>
 
-            {ok && (
+            {!!msg && (
               <div className="toast" style={{ position: "static" }}>
-                Te enviamos un correo con el enlace para crear una nueva contraseña. Revisa tu bandeja.
-              </div>
-            )}
-            {err && (
-              <div className="toast toast-error" style={{ position: "static" }}>
-                {err}
+                {msg}
               </div>
             )}
 
             <div className="card-footer" style={{ gridColumn: "1 / -1" }}>
-              <button className="btn btn-primary" type="submit" disabled={loading}>
-                {loading ? "Enviando..." : "Enviar enlace"}
+              <button className="btn btn-primary" type="submit" disabled={sending}>
+                {sending ? "Enviando..." : "Enviar enlace"}
               </button>
-              <Link className="btn" to="/login">Volver a Iniciar sesión</Link>
+              <Link to="/login" className="btn">Volver a iniciar sesión</Link>
             </div>
           </form>
         </div>

@@ -1,63 +1,59 @@
-// src/pages/VerifyEmail.jsx
-import { useState } from "react";
-import { Link } from "react-router-dom";
-import { useTenant } from "../tenant/TenantProvider";
-import { sendEmailVerification } from "firebase/auth";
+import { useEffect, useState } from "react";
+import { auth } from "../../firebaseClient.js";
+import { sendEmailVerification, reload } from "firebase/auth";
 import "./inventario.css";
 
 export default function VerifyEmail() {
-  const { currentUser } = useTenant();
-  const [message, setMessage] = useState(null);
-  const [loading, setLoading] = useState(false);
+  const [sending, setSending] = useState(false);
+  const [msg, setMsg] = useState("");
 
-  const resendVerification = async () => {
-    if (!currentUser) return;
+  useEffect(() => {
+    setMsg("Te enviamos un correo de verificación. Revisa tu bandeja de entrada y spam.");
+  }, []);
+
+  const handleResend = async () => {
+    if (!auth.currentUser) return;
     try {
-      setLoading(true);
-      await sendEmailVerification(currentUser);
-      setMessage("Correo de verificación reenviado ✅. Revisa tu bandeja.");
-    } catch (err) {
-      console.error(err);
-      setMessage("Error al enviar el correo de verificación.");
+      setSending(true);
+      setMsg("");
+      await sendEmailVerification(auth.currentUser, {
+        url: window.location.origin,
+        handleCodeInApp: true,
+      });
+      setMsg("Enviado nuevamente. Revisa tu correo.");
+    } catch (e) {
+      console.error(e);
+      setMsg("No se pudo reenviar. Intenta de nuevo en un momento.");
     } finally {
-      setLoading(false);
+      setSending(false);
+    }
+  };
+
+  const handleCheck = async () => {
+    try {
+      await reload(auth.currentUser);
+      if (auth.currentUser?.emailVerified) {
+        window.location.href = "/"; // TenantProvider te lleva a onboarding si no tienes empresa
+      } else {
+        setMsg("Aún no aparece verificado. Dale 10–20 segundos y vuelve a probar.");
+      }
+    } catch (e) {
+      console.error(e);
     }
   };
 
   return (
     <div className="inv-root" style={{ display: "grid", placeItems: "center" }}>
-      <div className="card" style={{ maxWidth: 500, width: "100%" }}>
+      <div className="card" style={{ maxWidth: 520, width: "100%" }}>
         <div className="card-header">
           <h2>Verifica tu correo</h2>
+          <p className="inv-subtle">{msg}</p>
         </div>
-        <div className="card-body">
-          <p>
-            Hemos enviado un correo de verificación a:
-          </p>
-          <p style={{ fontWeight: 600, marginBottom: 16 }}>
-            {currentUser?.email}
-          </p>
-          <p>
-            Por favor abre ese correo y haz clic en el enlace para activar tu cuenta.
-          </p>
-
-          {message && (
-            <div className="toast" style={{ position: "static", marginTop: 12 }}>
-              {message}
-            </div>
-          )}
-        </div>
-        <div className="card-footer">
-          <button
-            className="btn btn-primary"
-            onClick={resendVerification}
-            disabled={loading}
-          >
-            {loading ? "Enviando..." : "Reenviar correo"}
+        <div className="card-body" style={{ display: "flex", gap: 8 }}>
+          <button className="btn btn-primary" onClick={handleResend} disabled={sending}>
+            {sending ? "Enviando..." : "Reenviar correo"}
           </button>
-          <Link to="/login" className="btn">
-            Volver al login
-          </Link>
+          <button className="btn" onClick={handleCheck}>Ya verifiqué</button>
         </div>
       </div>
     </div>

@@ -4,13 +4,14 @@ import { useNavigate, Link, useParams } from "react-router-dom";
 import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
-import { getFunctions, httpsCallable } from "firebase/functions";
-import { app as firebaseApp } from "../../firebaseClient.js"; // exporta 'app' en tu firebase.js si no lo tenías
+import { db } from "../../firebaseClient.js";
+import { doc, setDoc, collection, serverTimestamp } from "firebase/firestore";
+import { sendEmailVerification } from "firebase/auth";
 
 export default function SignUp() {
   const { signup } = useTenant();
   const navigate = useNavigate();
-  const { empresaId } = useParams(); // viene de /registro/:empresaId (o undefined en /registro)
+  const { empresaId } = useParams(); // /registro/:empresaId (o undefined en /registro)
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -20,7 +21,7 @@ export default function SignUp() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  useEffect(()=>{ setError(null); },[email,password,password2]);
+  useEffect(() => { setError(null); }, [email, password, password2]);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -31,20 +32,45 @@ export default function SignUp() {
     try {
       setError(null);
       setLoading(true);
+
+      // 1) Crear cuenta
       const cred = await signup(email, password);
 
-      // Si el link traía empresaId, pedir unirse a esa empresa (límite 3)
-      if (empresaId) {
-        const functions = getFunctions(firebaseApp);
-        const joinCompany = httpsCallable(functions, "joinCompany");
-        await joinCompany({ empresaId });
+      // 2) Enviar correo de verificación
+      try {
+        await sendEmailVerification(cred.user, {
+          url: window.location.origin, // vuelve a tu app
+          handleCodeInApp: true,
+        });
+      } catch (e) {
+        console.warn("No se pudo enviar el correo de verificación aún:", e);
       }
 
-      // A donde quieres redirigir: inventario o verificar email
-      navigate("/");
+      // 3) Si venía invitación con empresaId, agregarlo como miembro y enlazar usuario->empresa
+      if (empresaId) {
+        const empresaRef = doc(db, "empresas", empresaId);
+
+        // membresía básica
+        await setDoc(
+          doc(collection(empresaRef, "miembros"), cred.user.uid),
+          {
+            uid: cred.user.uid,
+            email: cred.user.email || "",
+            rol: "member",             // owner solo quien crea la empresa
+            invitedVia: "link",
+            createdAt: serverTimestamp(),
+          },
+          { merge: true }
+        );
+
+        // enlazar usuario con la empresa
+        await setDoc(doc(db, "usuarios", cred.user.uid), { empresaId }, { merge: true });
+      }
+
+      // 4) Llevar siempre a la pantalla de verificación
+      navigate("/verificar");
     } catch (err) {
       console.error(err);
-      // Errores conocidos
       const msg =
         err?.message?.includes("3 usuarios")
           ? "Esta empresa ya alcanzó el límite de 3 usuarios."
@@ -61,7 +87,9 @@ export default function SignUp() {
         <div className="card-header">
           <h2>Crear cuenta {empresaId ? " (invitación)" : ""}</h2>
           {empresaId && (
-            <p className="inv-subtle">Te unirás a la empresa: <code>{empresaId}</code></p>
+            <p className="inv-subtle">
+              Te unirás a la empresa: <code>{empresaId}</code>
+            </p>
           )}
         </div>
         <div className="card-body">

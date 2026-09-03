@@ -1,5 +1,6 @@
+// src/pages/Inventario.jsx
 import { useEffect, useState, useRef, useMemo } from "react";
-import { db } from "../../firebaseClient";
+import { db } from "../../firebaseClient.js";
 import {
   collection, getDocs, addDoc, deleteDoc, doc, updateDoc, getDoc,
   query, orderBy, startAt, endAt
@@ -18,6 +19,34 @@ function useTheme() {
   const toggle = () => setTheme(t => (t === "dark" ? "light" : "dark"));
   return { theme, toggle };
 }
+// === util para números con puntos de miles ===
+const numericFields = new Set(["cantidad", "minimo", "precio", "costo"]);
+
+const limpiarNumero = (value) => {
+  return String(value ?? "").replace(/[^0-9]/g, "");
+};
+
+const numeroDesdeInput = (value) => {
+  const limpio = limpiarNumero(value);
+  return limpio ? Number(limpio) : 0;
+};
+
+const formatearNumero = (value) => {
+  const limpio = limpiarNumero(value);
+  if (!limpio) return "";
+  return Number(limpio).toLocaleString("es-CO");
+};
+
+const formatearMoneda = (value) => {
+  const n = Number(value || 0);
+  return n > 0 ? `$${n.toLocaleString("es-CO")}` : "N/D";
+};
+
+const formatearCantidad = (value) => {
+  const n = Number(value || 0);
+  return n.toLocaleString("es-CO");
+};
+
 
 function Inventario() {
   const { theme, toggle } = useTheme();
@@ -28,7 +57,7 @@ function Inventario() {
   const [nuevoProducto, setNuevoProducto] = useState({
     nombre: "", cantidad: "", minimo: "", imagen: null,
     precio: "",           // precio de venta
-    costo: "",            // ✅ costo de compra
+    costo: "",            // costo de compra
     categoriaId: ""       // "" = sin categoría
   });
   const [editandoId, setEditandoId] = useState(null);
@@ -51,7 +80,7 @@ function Inventario() {
   // Empresa (logo/nombre/NIT) – lo seguimos leyendo del doc raíz si existe
   const [empresaInfo, setEmpresaInfo] = useState(null);
 
-  // Imagenes / upload
+  // Imágenes / upload
   const inputCamaraRef = useRef(null);
   const inputGaleriaRef = useRef(null);
   const [preview, setPreview] = useState(null);
@@ -65,13 +94,17 @@ function Inventario() {
   // ---------- Deriva paths por empresa ----------
   const productosCol = useMemo(() => {
     if (!empresa?.id) return null;
+    const path = `empresas/${empresa.id}/productos`;
+    console.debug("DBG productos path ->", path);
     return collection(db, "empresas", empresa.id, "productos");
-  }, [empresa]);
+  }, [empresa?.id]);
 
   const categoriasCol = useMemo(() => {
     if (!empresa?.id) return null;
+    const path = `empresas/${empresa.id}/categorias`;
+    console.debug("DBG categorias path ->", path);
     return collection(db, "empresas", empresa.id, "categorias");
-  }, [empresa]);
+  }, [empresa?.id]);
 
   // ---------- Efectos ----------
   // Debounce buscador
@@ -99,7 +132,7 @@ function Inventario() {
         if (snap.exists()) setEmpresaInfo(snap.data());
       } catch {}
     })();
-  }, [empresa]);
+  }, [empresa?.id]);
 
   // Cargar categorías por empresa
   const cargarCategorias = async () => {
@@ -151,7 +184,19 @@ function Inventario() {
   },[debounced, productosCol]);
 
   // ---------- Handlers de formulario ----------
-  const handleChange = (e) => setNuevoProducto({ ...nuevoProducto, [e.target.name]: e.target.value });
+  const handleChange = (e) => {
+    const { name, value } = e.target;
+
+    if (numericFields.has(name)) {
+      setNuevoProducto(prev => ({
+        ...prev,
+        [name]: formatearNumero(value)
+      }));
+      return;
+    }
+
+    setNuevoProducto(prev => ({ ...prev, [name]: value }));
+  };
 
   const handleFileChange = (e) => {
     const file = e.target.files?.[0]; if (!file) return;
@@ -185,10 +230,12 @@ function Inventario() {
     const base = file.name.replace(/\.[^/.]+$/, ""); return dataURLtoFile(dataUrl, `${base}.jpg`);
   }
   function subirImagenAImgBBConProgreso(file, onProgress) {
+    const API_KEY = import.meta.env?.VITE_IMGBB_API_KEY || "";
     return new Promise((resolve, reject) => {
+      if (!API_KEY) return reject(new Error("Falta VITE_IMGBB_API_KEY"));
       const fd = new FormData(); fd.append("image", file);
       const xhr = new XMLHttpRequest();
-      xhr.open("POST","https://api.imgbb.com/1/upload?key=46bbab2f0ec657f928ab05ac5d78c37b");
+      xhr.open("POST", `https://api.imgbb.com/1/upload?key=${API_KEY}`);
       xhr.upload.onprogress = (e)=>{ if(e.lengthComputable&&onProgress){ onProgress(Math.round((e.loaded/e.total)*100)); } };
       xhr.onload = ()=>{ try{ const j = JSON.parse(xhr.responseText); j?.data?.url ? resolve(j.data.url) : reject(new Error("Respuesta imgbb inválida")); } catch(err){ reject(err); } };
       xhr.onerror = ()=>reject(new Error("Fallo de red")); xhr.send(fd);
@@ -215,21 +262,23 @@ function Inventario() {
       const categoriaNombre = cat?.nombre || null;
 
       const productoData = {
-        nombre: nuevoProducto.nombre,
+        nombre: (nuevoProducto.nombre || "").trim(),
         nombreLower: (nuevoProducto.nombre || "").trim().toLowerCase(),
-        cantidad: parseInt(nuevoProducto.cantidad),
-        minimo: parseInt(nuevoProducto.minimo),
+        cantidad: numeroDesdeInput(nuevoProducto.cantidad),
+        minimo: numeroDesdeInput(nuevoProducto.minimo),
         imagen: urlImagen || null,
-        precioUnitario: parseFloat(nuevoProducto.precio || 0),
-        costoUnitario: parseFloat(nuevoProducto.costo || 0), // ✅ guardamos costo
+        precioUnitario: numeroDesdeInput(nuevoProducto.precio),
+        costoUnitario: numeroDesdeInput(nuevoProducto.costo),
         categoriaId: nuevoProducto.categoriaId || "",
         categoriaNombre: categoriaNombre || null
       };
 
       if (editandoId) {
+        console.debug("WRITE to ->", `empresas/${empresa.id}/productos (update: ${editandoId})`);
         await updateDoc(doc(db, "empresas", empresa.id, "productos", editandoId), productoData);
         setEditandoId(null);
       } else {
+        console.debug("WRITE to ->", `empresas/${empresa.id}/productos (new)`);
         await addDoc(productosCol, productoData);
       }
 
@@ -271,10 +320,12 @@ function Inventario() {
     if (objectUrlRef.current) { URL.revokeObjectURL(objectUrlRef.current); objectUrlRef.current = null; }
     setPreview(p.imagen || null);
     setNuevoProducto({
-      nombre:p.nombre, cantidad:p.cantidad, minimo:p.minimo,
+      nombre:p.nombre,
+      cantidad: formatearNumero(p.cantidad ?? ""),
+      minimo: formatearNumero(p.minimo ?? ""),
       imagen:p.imagen || null,
-      precio:p.precioUnitario || "",
-      costo:p.costoUnitario || "",          // ✅ cargamos costo al editar
+      precio: formatearNumero(p.precioUnitario ?? ""),
+      costo: formatearNumero(p.costoUnitario ?? ""),
       categoriaId: p.categoriaId || ""
     });
     setEditandoId(p.id);
@@ -301,7 +352,7 @@ function Inventario() {
       const ref = await addDoc(categoriasCol, cat);
 
       await cargarCategorias();
-      setFiltroCategoria(ref.id); // opcional
+      setFiltroCategoria(ref.id); // opcional: seleccionar recién creada
       cerrarModalCategoria();
     } catch (e) {
       console.error(e);
@@ -384,6 +435,9 @@ function Inventario() {
           <Link to="/clientes" className="btn">👥 Clientes</Link>
           <Link to="/configuracion" className="btn">⚙️ Configuración</Link>
           <Link to="/importar" className="btn">⬆️ Importar</Link>
+          <Link to="/historial" className="btn">📜 Historial</Link>
+          <Link to="/reportes" className="btn">📊 Reportes</Link>
+
 
         </div>
       </header>
@@ -445,19 +499,19 @@ function Inventario() {
               </div>
               <div className="form-field">
                 <label>Cantidad</label>
-                <input type="number" name="cantidad" placeholder="0" value={nuevoProducto.cantidad} onChange={handleChange} />
+                <input type="text" inputMode="numeric" name="cantidad" placeholder="0" value={nuevoProducto.cantidad} onChange={handleChange} />
               </div>
               <div className="form-field">
                 <label>Stock mínimo</label>
-                <input type="number" name="minimo" placeholder="0" value={nuevoProducto.minimo} onChange={handleChange} />
+                <input type="text" inputMode="numeric" name="minimo" placeholder="0" value={nuevoProducto.minimo} onChange={handleChange} />
               </div>
               <div className="form-field">
                 <label>Precio de venta</label>
-                <input type="number" name="precio" placeholder="0" value={nuevoProducto.precio} onChange={handleChange} />
+                <input type="text" inputMode="numeric" name="precio" placeholder="0" value={nuevoProducto.precio} onChange={handleChange} />
               </div>
               <div className="form-field">
                 <label>Costo (lo que te vale)</label>
-                <input type="number" name="costo" placeholder="0" value={nuevoProducto.costo} onChange={handleChange} />
+                <input type="text" inputMode="numeric" name="costo" placeholder="0" value={nuevoProducto.costo} onChange={handleChange} />
               </div>
 
               {/* Selector de categoría del producto */}
@@ -527,10 +581,10 @@ function Inventario() {
                             {Number(p.cantidad) <= Number(p.minimo) && <span className="badge-danger">Stock bajo</span>}
                           </div>
                           <div className="product-meta">
-                            <span>Cant: <b>{p.cantidad}</b></span>
-                            <span>Mín: <b>{p.minimo}</b></span>
-                            <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
-                            <span>Costo: <b>${p.costoUnitario?.toLocaleString() || "N/D"}</b></span>
+                            <span>Cant: <b>{formatearCantidad(p.cantidad)}</b></span>
+                            <span>Mín: <b>{formatearCantidad(p.minimo)}</b></span>
+                            <span>Precio: <b>{formatearMoneda(p.precioUnitario)}</b></span>
+                            <span>Costo: <b>{formatearMoneda(p.costoUnitario)}</b></span>
                           </div>
                         </div>
                         <div className="product-actions">
@@ -557,10 +611,10 @@ function Inventario() {
                                   {Number(p.cantidad) <= Number(p.minimo) && <span className="badge-danger">Stock bajo</span>}
                                 </div>
                                 <div className="product-meta">
-                                  <span>Cant: <b>{p.cantidad}</b></span>
-                                  <span>Mín: <b>{p.minimo}</b></span>
-                                  <span>Precio: <b>${p.precioUnitario?.toLocaleString() || "N/D"}</b></span>
-                                  <span>Costo: <b>${p.costoUnitario?.toLocaleString() || "N/D"}</b></span>
+                                  <span>Cant: <b>{formatearCantidad(p.cantidad)}</b></span>
+                                  <span>Mín: <b>{formatearCantidad(p.minimo)}</b></span>
+                                  <span>Precio: <b>{formatearMoneda(p.precioUnitario)}</b></span>
+                                  <span>Costo: <b>{formatearMoneda(p.costoUnitario)}</b></span>
                                 </div>
                               </div>
                               <div className="product-actions">

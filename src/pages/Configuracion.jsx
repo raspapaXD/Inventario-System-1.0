@@ -5,6 +5,8 @@ import { Link } from "react-router-dom";
 import InstallPWA from "../components/InstallPWA.jsx";
 import { doc, getDoc } from "firebase/firestore";
 import { db } from "../../firebaseClient.js";
+import InviteLinkCard from "../components/InviteLinkCard.jsx";
+import CompanyProfileCard from "../components/CompanyProfileCard.jsx";
 
 import "./inventario.css";
 
@@ -20,7 +22,7 @@ function useTheme() {
 
 export default function Configuracion() {
   const { theme, toggle } = useTheme();
-  const { empresa, user, unlinkCurrentDevice, deviceError } = useTenant();
+  const { empresa, user, unlinkCurrentDevice, deviceError, canManage } = useTenant();
   const [empresaData, setEmpresaData] = useState(null);
   const [freeing, setFreeing] = useState(false);
   const [msg, setMsg] = useState(null);
@@ -71,15 +73,13 @@ export default function Configuracion() {
 
       {/* Contenido */}
       <section className="inv-grid" style={{ gridTemplateColumns: "1fr" }}>
-        <div className="card">
-          <div className="card-header"><h2>Opciones de la empresa</h2></div>
-          <div className="card-body">
-            <p><strong>Nombre:</strong> {empresa?.nombre || "—"}</p>
-            <p><strong>NIT:</strong> {empresa?.nit || "—"}</p>
-            <p><strong>Correo administrador:</strong> {user?.email}</p>
-          </div>
-        </div>
+        {/* Perfil editable (solo guardan Owner/Admin) */}
+        <CompanyProfileCard />
 
+        {/* Invitar usuarios (solo Owner/Admin dentro del componente) */}
+        <InviteLinkCard />
+
+        {/* Dispositivos */}
         <div className="card">
           <div className="card-header"><h2>Dispositivos</h2></div>
           <div className="card-body">
@@ -109,6 +109,7 @@ export default function Configuracion() {
           </div>
         </div>
 
+        {/* Instalar aplicación */}
         <div className="card">
           <div className="card-header"><h2>Instalar aplicación</h2></div>
           <div className="card-body">

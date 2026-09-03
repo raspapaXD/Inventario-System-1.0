@@ -1,11 +1,13 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, Link } from "react-router-dom";
-import { db } from "../../firebaseClient";
+import { db } from "../../firebaseClient.js";
 import { doc, getDoc, collection, query, where, getDocs } from "firebase/firestore";
+import { useTenant } from "../tenant/TenantProvider";
 import "./inventario.css";
 
 export default function ClienteDetalle(){
-  const { id } = useParams(); // id del cliente (documento normalizado)
+  const { empresa } = useTenant();
+  const { id } = useParams(); // id del cliente (doc dentro de la empresa)
   const [cliente, setCliente] = useState(null);
   const [ventas, setVentas] = useState([]);
   const [error, setError] = useState(null);
@@ -13,50 +15,43 @@ export default function ClienteDetalle(){
 
   useEffect(() => {
     (async () => {
+      if (!empresa?.id || !id) return;
       try {
         setError(null);
         setCargando(true);
 
-        // 1) Traer cliente
-        const cSnap = await getDoc(doc(db, "clientes", id));
+        // 1) Cliente bajo la empresa
+        const cSnap = await getDoc(doc(db, "empresas", empresa.id, "clientes", id));
         if (cSnap.exists()) setCliente({ id, ...cSnap.data() });
 
-        // 2) Traer ventas por referencia (SIN orderBy para evitar índice compuesto)
+        // 2) Ventas bajo la empresa, por clienteId (usa solo el ID, no path)
         const qy = query(
-          collection(db, "ventas"),
-          where("clienteId", "==", `clientes/${id}`)
+          collection(db, "empresas", empresa.id, "ventas"),
+          where("clienteId", "==", id)
         );
         const vSnap = await getDocs(qy);
 
-        // 3) Normalizar y ORDENAR en memoria por fecha DESC
+        // 3) Normalizar y ordenar por fecha DESC en memoria
         const lista = vSnap.docs.map(d => {
           const data = d.data();
-
-          // Normaliza fecha a Date para ordenar
           let fechaJS = null;
           const f = data.fecha;
-          if (f?.toDate) fechaJS = f.toDate();           // Timestamp Firestore
+          if (f?.toDate) fechaJS = f.toDate();
           else if (typeof f === "number") fechaJS = new Date(f);
           else if (typeof f === "string") fechaJS = new Date(f);
-
           return { id: d.id, ...data, __fechaJS: fechaJS };
         });
-
-        lista.sort((a, b) => {
-          const ta = a.__fechaJS ? a.__fechaJS.getTime() : 0;
-          const tb = b.__fechaJS ? b.__fechaJS.getTime() : 0;
-          return tb - ta; // más recientes primero
-        });
+        lista.sort((a,b) => (b.__fechaJS?.getTime() || 0) - (a.__fechaJS?.getTime() || 0));
 
         setVentas(lista);
       } catch (e) {
         console.error(e);
-        setError("No se pudieron cargar las ventas de este cliente.");
+        setError("No se pudieron cargar los datos de este cliente (permisos o conexión).");
       } finally {
         setCargando(false);
       }
     })();
-  }, [id]);
+  }, [empresa?.id, id]);
 
   const totalCompras = useMemo(
     () => ventas.reduce((acc, v) => acc + Number(v.total || 0), 0),
@@ -69,7 +64,15 @@ export default function ClienteDetalle(){
     if (typeof f === "number") return new Date(f).toLocaleString();
     if (typeof f === "string") return new Date(f).toLocaleString();
     return "—";
-  };
+    };
+
+  if (!empresa?.id) {
+    return (
+      <div className="inv-root">
+        <header className="inv-header"><h1>Cargando empresa…</h1></header>
+      </div>
+    );
+  }
 
   return (
     <div className="inv-root">
