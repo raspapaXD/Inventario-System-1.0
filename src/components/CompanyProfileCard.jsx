@@ -1,9 +1,9 @@
 // src/components/CompanyProfileCard.jsx
 import { useState } from "react";
-import { useTenant } from "../tenant/TenantProvider";
+import { useTenant } from "../tenant/TenantProvider.jsx";
 import { db } from "../../firebaseClient.js";
 import { doc, setDoc } from "firebase/firestore";
-import { uploadToImgBB } from "../services/imgbb";
+import { uploadToImgBB } from "../services/imgbb.js";
 
 export default function CompanyProfileCard() {
   const { empresa, canManage } = useTenant();

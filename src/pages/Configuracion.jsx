@@ -22,7 +22,7 @@ function useTheme() {
 
 export default function Configuracion() {
   const { theme, toggle } = useTheme();
-  const { empresa, user, unlinkCurrentDevice, deviceError, canManage } = useTenant();
+  const { empresa, user, unlinkCurrentDevice, deviceError } = useTenant();
   const [empresaData, setEmpresaData] = useState(null);
   const [freeing, setFreeing] = useState(false);
   const [msg, setMsg] = useState(null);
