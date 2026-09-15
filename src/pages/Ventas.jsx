@@ -279,6 +279,65 @@ export default function Ventas() {
   ] = useState("");
 
   /* =======================================================
+     STOCK DISPONIBLE DENTRO DE LA VENTA ACTUAL
+
+     Firestore conserva el stock real hasta que se registra
+     la venta. Mientras el vendedor arma el carrito,
+     descontamos visualmente las unidades ya agregadas.
+  ======================================================= */
+
+  const cantidadEnCarritoDe =
+    productoId => {
+      const item =
+        items.find(
+          it =>
+            it.productoId ===
+            productoId
+        );
+
+      return Number(
+        item?.cantidad || 0
+      );
+    };
+
+  const stockDisponibleEnVenta =
+    producto => {
+      if (!producto?.id) {
+        return 0;
+      }
+
+      const stockBase =
+        Number(
+          producto.cantidad || 0
+        );
+
+      const reservado =
+        cantidadEnCarritoDe(
+          producto.id
+        );
+
+      return Math.max(
+        0,
+        stockBase -
+        reservado
+      );
+    };
+
+  const cantidadSeleccionadaEnCarrito =
+    productoSeleccionado
+      ? cantidadEnCarritoDe(
+          productoSeleccionado.id
+        )
+      : 0;
+
+  const stockDisponibleSeleccionado =
+    productoSeleccionado
+      ? stockDisponibleEnVenta(
+          productoSeleccionado
+        )
+      : 0;
+
+  /* =======================================================
      CARGAR PRODUCTOS
   ======================================================= */
 
@@ -372,13 +431,15 @@ export default function Ventas() {
         .filter(
           p =>
             p &&
-            p.activo !== false
+            p.activo !== false &&
+            stockDisponibleEnVenta(p) > 0
         )
         .slice(0, 5);
 
     }, [
       recientes,
-      productos
+      productos,
+      items
     ]);
 
   /* =======================================================
@@ -474,6 +535,24 @@ export default function Ventas() {
     );
 
   /* =======================================================
+     TOTAL DE UNIDADES
+  ======================================================= */
+
+  const totalUnidades =
+    useMemo(
+      () =>
+        items.reduce(
+          (acc, it) =>
+            acc +
+            Number(
+              it.cantidad || 0
+            ),
+          0
+        ),
+      [items]
+    );
+
+  /* =======================================================
      DESCUENTO TOTAL
   ======================================================= */
 
@@ -531,6 +610,23 @@ export default function Ventas() {
 
         return setError(
           "Este producto está inactivo y no puede venderse."
+        );
+      }
+
+      const disponible =
+        stockDisponibleEnVenta(
+          producto
+        );
+
+      if (
+        disponible <= 0
+      ) {
+        setProductoSeleccionado(
+          null
+        );
+
+        return setError(
+          `Ya agregaste todo el stock disponible de "${producto.nombre}" a esta venta.`
         );
       }
 
@@ -695,16 +791,23 @@ export default function Ventas() {
           )
         : 0;
 
+    const stockDisponibleVenta =
+      Math.max(
+        0,
+        stockDisponible -
+        cantidadEnCarrito
+      );
+
     const cantidadFinal =
       cantidadEnCarrito +
       cantidadNueva;
 
     if (
-      cantidadFinal >
-      stockDisponible
+      cantidadNueva >
+      stockDisponibleVenta
     ) {
       return setError(
-        `No hay suficiente stock. Disponible: ${stockDisponible}.`
+        `No hay suficiente stock. Disponible para agregar: ${stockDisponibleVenta}.`
       );
     }
 
@@ -2047,14 +2150,41 @@ export default function Ventas() {
                         </span>
 
                         <span>
-                          Stock:{" "}
+                          Disponible:{" "}
 
-                          <b>
+                          <b
+                            style={{
+                              color:
+                                stockDisponibleSeleccionado > 0
+                                  ? "#22c55e"
+                                  : "#ef4444"
+                            }}
+                          >
                             {
-                              productoSeleccionado.cantidad
+                              stockDisponibleSeleccionado
                             }
                           </b>
                         </span>
+
+                        {cantidadSeleccionadaEnCarrito >
+                          0 && (
+
+                          <span>
+                            En esta venta:{" "}
+
+                            <b
+                              style={{
+                                color:
+                                  "#00b4d8"
+                              }}
+                            >
+                              {
+                                cantidadSeleccionadaEnCarrito
+                              }
+                            </b>
+                          </span>
+
+                        )}
 
                       </div>
 
@@ -2293,16 +2423,34 @@ export default function Ventas() {
         </div>
 
         {/* =================================================
-            DETALLE VENTA
+            DETALLE VENTA - VISTA COMPACTA
         ================================================= */}
 
-        <div className="card">
+        <div className="card venta-detalle-card">
 
-          <div className="card-header">
+          <div className="card-header venta-detalle-header">
 
-            <h2>
-              Detalle de la venta
-            </h2>
+            <div>
+
+              <h2>
+                Detalle de la venta
+              </h2>
+
+              <p className="inv-subtle venta-detalle-resumen">
+                {items.length === 0
+                  ? "Aún no hay productos agregados."
+                  : `${items.length} ${
+                      items.length === 1
+                        ? "referencia"
+                        : "referencias"
+                    } • ${totalUnidades} ${
+                      totalUnidades === 1
+                        ? "unidad"
+                        : "unidades"
+                    }`}
+              </p>
+
+            </div>
 
             <span
               className="badge"
@@ -2322,281 +2470,239 @@ export default function Ventas() {
 
           </div>
 
-          <div className="card-body">
+          <div className="card-body venta-detalle-body">
 
-            {items.length ===
-            0 ? (
+            {items.length === 0 ? (
 
-              <p className="inv-subtle">
-                Sin productos agregados.
-              </p>
+              <div className="venta-detalle-vacio">
+                <span className="venta-detalle-vacio-icono">
+                  🛒
+                </span>
+
+                <p className="inv-subtle">
+                  Sin productos agregados.
+                </p>
+              </div>
 
             ) : (
 
-              <ul className="product-list">
+              <div className="venta-tabla-wrap">
 
-                {items.map(it => {
+                <div className="venta-tabla">
 
-                  const tieneDescuento =
-                    Number(
-                      it.precioUnitario
-                    ) <
-                    Number(
-                      it.precioLista
-                    );
-
-                  return (
-
-                    <li
-                      key={
-                        it.productoId
-                      }
-                      className="product-item"
+                  <div className="venta-tabla-head">
+                    <span>Producto</span>
+                    <span className="venta-col-center">
+                      Cant.
+                    </span>
+                    <span className="venta-col-number">
+                      Precio
+                    </span>
+                    <span className="venta-col-number venta-col-minimo">
+                      Mínimo
+                    </span>
+                    <span className="venta-col-number">
+                      Subtotal
+                    </span>
+                    <span
+                      className="venta-col-center"
+                      aria-hidden="true"
                     >
+                      Acción
+                    </span>
+                  </div>
 
-                      <div className="product-info">
+                  <div className="venta-tabla-body">
 
-                        <div className="product-title-row">
+                    {items.map(it => {
 
-                          <strong>
-                            {it.nombre}
-                          </strong>
+                      const tieneDescuento =
+                        Number(
+                          it.precioUnitario
+                        ) <
+                        Number(
+                          it.precioLista
+                        );
 
-                          {tieneDescuento && (
+                      return (
 
-                            <span
-                              className="badge"
-                              style={{
-                                color:
-                                  "#22c55e"
-                              }}
+                        <div
+                          key={
+                            it.productoId
+                          }
+                          className="venta-tabla-row"
+                        >
+
+                          <div className="venta-producto-cell">
+
+                            <strong
+                              className="venta-producto-nombre"
+                              title={it.nombre}
                             >
-                              🏷️{" "}
-                              {Number(
-                                it.descuentoPorcentaje ||
-                                0
-                              ).toFixed(
-                                1
-                              )}
-                              % desc.
-                            </span>
+                              {it.nombre}
+                            </strong>
 
-                          )}
+                            {tieneDescuento && (
 
-                        </div>
+                              <span className="venta-descuento-mini">
+                                🏷️{" "}
+                                {Number(
+                                  it.descuentoPorcentaje ||
+                                  0
+                                ).toFixed(
+                                  1
+                                )}
+                                %
+                              </span>
 
-                        <div className="product-meta">
+                            )}
 
-                          <span>
-                            Cant:{" "}
+                          </div>
 
-                            <b>
-                              {
-                                it.cantidad
-                              }
-                            </b>
-                          </span>
+                          <div
+                            className="venta-col-center venta-cantidad"
+                            data-label="Cantidad"
+                          >
+                            {it.cantidad}
+                          </div>
 
-                          {tieneDescuento && (
+                          <div
+                            className="venta-col-number venta-precio-cell"
+                            data-label="Precio"
+                          >
 
-                            <span>
-                              Precio normal:{" "}
+                            {tieneDescuento && (
 
-                              <b
-                                style={{
-                                  textDecoration:
-                                    "line-through",
-                                  opacity:
-                                    0.65
-                                }}
-                              >
+                              <span className="venta-precio-lista">
                                 {formatMoney(
                                   it.precioLista
                                 )}
-                              </b>
-                            </span>
+                              </span>
 
-                          )}
+                            )}
 
-                          <span>
-                            Precio cobrado:{" "}
-
-                            <b>
+                            <strong>
                               {formatMoney(
                                 it.precioUnitario
                               )}
-                            </b>
-                          </span>
+                            </strong>
 
-                          <span>
-                            Mínimo:{" "}
+                          </div>
 
-                            <b>
-                              {formatMoney(
-                                it.precioMinimo
-                              )}
-                            </b>
-                          </span>
+                          <div
+                            className="venta-col-number venta-col-minimo"
+                            data-label="Mínimo"
+                          >
+                            {formatMoney(
+                              it.precioMinimo
+                            )}
+                          </div>
 
-                          <span>
-                            Subtotal:{" "}
+                          <div
+                            className="venta-col-number venta-subtotal"
+                            data-label="Subtotal"
+                          >
+                            {formatMoney(
+                              it.cantidad *
+                              it.precioUnitario
+                            )}
+                          </div>
 
-                            <b>
-                              {formatMoney(
-                                it.cantidad *
-                                it.precioUnitario
-                              )}
-                            </b>
-                          </span>
+                          <div className="venta-col-center venta-accion">
+
+                            <button
+                              type="button"
+                              className="btn btn-small btn-danger venta-quitar-btn"
+                              onClick={() =>
+                                quitarItem(
+                                  it.productoId
+                                )
+                              }
+                              title={`Quitar ${it.nombre}`}
+                              aria-label={`Quitar ${it.nombre}`}
+                            >
+                              ✕
+                              <span className="venta-quitar-texto">
+                                Quitar
+                              </span>
+                            </button>
+
+                          </div>
 
                         </div>
 
-                      </div>
+                      );
+                    })}
 
-                      <div className="product-actions">
+                  </div>
 
-                        <button
-                          className="btn btn-small btn-danger"
-                          onClick={() =>
-                            quitarItem(
-                              it.productoId
-                            )
-                          }
-                        >
-                          Quitar
-                        </button>
-
-                      </div>
-
-                    </li>
-
-                  );
-                })}
-
-              </ul>
-
-            )}
-
-            {/* DESCUENTO */}
-
-            {descuentoTotal >
-              0 && (
-
-              <div
-                style={{
-                  marginTop: 16,
-                  padding:
-                    "11px 14px",
-                  borderRadius: 12,
-                  display: "flex",
-                  justifyContent:
-                    "space-between",
-                  alignItems:
-                    "center",
-                  gap: 12,
-                  background:
-                    "rgba(34,197,94,.07)",
-                  border:
-                    "1px solid rgba(34,197,94,.20)"
-                }}
-              >
-
-                <span>
-                  🏷️ Descuentos aplicados
-                </span>
-
-                <strong
-                  style={{
-                    color:
-                      "#22c55e"
-                  }}
-                >
-                  -{formatMoney(
-                    descuentoTotal
-                  )}
-                </strong>
+                </div>
 
               </div>
 
             )}
 
-            {/* TOTAL */}
+            <div className="venta-resumen-fijo">
 
-            <div
-              style={{
-                marginTop: 16,
-                display: "flex",
-                justifyContent:
-                  "space-between",
-                alignItems:
-                  "center",
-                gap: 12,
-                flexWrap: "wrap",
-                borderTop:
-                  "1px solid var(--border)",
-                paddingTop: 14
-              }}
-            >
+              {descuentoTotal >
+                0 && (
 
-              <strong>
-                Total:
-              </strong>
+                <div className="venta-resumen-linea venta-resumen-descuento">
 
-              <h2
-                style={{
-                  margin: 0
-                }}
-              >
-                {formatMoney(total)}
-              </h2>
+                  <span>
+                    🏷️ Descuentos aplicados
+                  </span>
 
-            </div>
+                  <strong>
+                    -{formatMoney(
+                      descuentoTotal
+                    )}
+                  </strong>
 
-            {/* SALDO CRÉDITO */}
+                </div>
 
-            {tipoPago ===
-              "CREDITO" && (
+              )}
 
-              <div
-                style={{
-                  marginTop: 12,
-                  display: "flex",
-                  justifyContent:
-                    "space-between",
-                  alignItems:
-                    "center",
-                  gap: 12,
-                  flexWrap: "wrap",
-                  padding:
-                    "12px 14px",
-                  borderRadius: 14,
-                  background:
-                    "rgba(245,158,11,.08)",
-                  border:
-                    "1px solid rgba(245,158,11,.25)"
-                }}
-              >
+              <div className="venta-resumen-total">
 
-                <span>
-                  Saldo pendiente:
-                </span>
+                <div>
+                  <span className="inv-subtle venta-total-etiqueta">
+                    Total de la venta
+                  </span>
 
-                <strong
-                  style={{
-                    color:
-                      "#f59e0b"
-                  }}
-                >
+                  <strong className="venta-total-referencias">
+                    {items.length} ref. • {totalUnidades} unid.
+                  </strong>
+                </div>
+
+                <strong className="venta-total-valor">
                   {formatMoney(total)}
                 </strong>
 
               </div>
 
-            )}
+              {tipoPago ===
+                "CREDITO" && (
+
+                <div className="venta-resumen-linea venta-resumen-credito">
+
+                  <span>
+                    Saldo pendiente
+                  </span>
+
+                  <strong>
+                    {formatMoney(total)}
+                  </strong>
+
+                </div>
+
+              )}
+
+            </div>
 
           </div>
 
-          <div className="card-footer">
+          <div className="card-footer venta-footer">
 
             <button
               className="btn btn-primary"
@@ -2769,8 +2875,14 @@ export default function Ventas() {
                             p
                           )
                         }
+                        title={`${stockDisponibleEnVenta(
+                          p
+                        )} disponibles`}
                       >
-                        {p.nombre}
+                        {p.nombre} ·{" "}
+                        {stockDisponibleEnVenta(
+                          p
+                        )} disp.
                       </button>
 
                     )
@@ -2814,8 +2926,22 @@ export default function Ventas() {
                   {productosModal.map(
                     p => {
 
+                      const reservadoEnVenta =
+                        cantidadEnCarritoDe(
+                          p.id
+                        );
+
+                      const disponibleEnVenta =
+                        stockDisponibleEnVenta(
+                          p
+                        );
+
                       const stock =
-                        stockInfo(p);
+                        stockInfo({
+                          ...p,
+                          cantidad:
+                            disponibleEnVenta
+                        });
 
                       const minimoVenta =
                         obtenerPrecioMinimo(
@@ -2944,9 +3070,26 @@ export default function Ventas() {
                               }}
                             >
                               {stock.icon}{" "}
-                              {stock.label}:{" "}
-                              {p.cantidad}
+                              Disponible:{" "}
+                              {disponibleEnVenta}
                             </span>
+
+                            {reservadoEnVenta >
+                              0 && (
+
+                              <span
+                                style={{
+                                  fontSize: 12,
+                                  color:
+                                    "#00b4d8",
+                                  fontWeight: 700
+                                }}
+                              >
+                                🛒 En esta venta:{" "}
+                                {reservadoEnVenta}
+                              </span>
+
+                            )}
 
                             {p.categoriaNombre && (
 
@@ -2990,18 +3133,14 @@ export default function Ventas() {
                                 "center"
                             }}
                             disabled={
-                              Number(
-                                p.cantidad ||
-                                0
-                              ) <= 0
+                              disponibleEnVenta <= 0
                             }
                           >
-                            {Number(
-                              p.cantidad ||
-                              0
-                            ) <= 0
-                              ? "Sin stock"
-                              : "Seleccionar"}
+                            {disponibleEnVenta <= 0
+                              ? reservadoEnVenta > 0
+                                ? "Agotado en esta venta"
+                                : "Sin stock"
+                              : `Seleccionar · ${disponibleEnVenta} disp.`}
                           </button>
 
                         </div>

@@ -105,6 +105,30 @@ const formatearMoneda = value =>
   })}`;
 
 /* =========================================================
+   CÓDIGO / SKU
+========================================================= */
+
+const normalizarCodigo = value =>
+  String(value || "")
+    .trim()
+    .toUpperCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Z0-9_-]/g, "");
+
+const formatearCodigoAutomatico = numero =>
+  `PROD-${String(numero).padStart(6, "0")}`;
+
+const numeroCodigoAutomatico = codigo => {
+  const match = String(codigo || "")
+    .toUpperCase()
+    .match(/^PROD-(\d+)$/);
+
+  return match
+    ? Number(match[1])
+    : 0;
+};
+
+/* =========================================================
    PRECIO MÍNIMO
 ========================================================= */
 
@@ -507,6 +531,7 @@ function Inventario() {
     productoForm,
     setProductoForm
   ] = useState({
+    codigo: "",
     nombre: "",
     minimo: "",
     imagen: null,
@@ -1002,7 +1027,7 @@ function Inventario() {
 
           if (q) {
             const texto =
-              `${producto.nombre || ""} ${producto.categoriaNombre || ""}`
+              `${producto.codigo || ""} ${producto.nombre || ""} ${producto.categoriaNombre || ""}`
                 .toLowerCase();
 
             if (
@@ -1255,6 +1280,7 @@ function Inventario() {
       );
 
       setProductoForm({
+        codigo: "",
         nombre: "",
         minimo: "",
         imagen: null,
@@ -1306,6 +1332,10 @@ function Inventario() {
       );
 
       setProductoForm({
+        codigo:
+          producto.codigo ||
+          "",
+
         nombre:
           producto.nombre ||
           "",
@@ -1353,6 +1383,79 @@ function Inventario() {
       );
 
       resetProductoForm();
+    };
+
+  /* =======================================================
+     RESERVAR CÓDIGO AUTOMÁTICO
+  ======================================================= */
+
+  const reservarCodigoAutomatico =
+    async () => {
+      if (!empresa?.id) {
+        throw new Error(
+          "No hay empresa activa."
+        );
+      }
+
+      const counterRef =
+        doc(
+          db,
+          "empresas",
+          empresa.id,
+          "contadores",
+          "productos"
+        );
+
+      const maxCodigoExistente =
+        Math.max(
+          0,
+          ...productos.map(
+            producto =>
+              numeroCodigoAutomatico(
+                producto.codigo
+              )
+          )
+        );
+
+      return runTransaction(
+        db,
+        async transaction => {
+          const snap =
+            await transaction.get(
+              counterRef
+            );
+
+          const ultimoGuardado =
+            snap.exists()
+              ? Number(
+                  snap.data()?.ultimo ||
+                  0
+                )
+              : 0;
+
+          const siguiente =
+            Math.max(
+              ultimoGuardado,
+              maxCodigoExistente
+            ) + 1;
+
+          transaction.set(
+            counterRef,
+            {
+              ultimo:
+                siguiente,
+
+              actualizadoEn:
+                serverTimestamp()
+            },
+            { merge: true }
+          );
+
+          return formatearCodigoAutomatico(
+            siguiente
+          );
+        }
+      );
     };
 
   /* =======================================================
@@ -1420,6 +1523,39 @@ function Inventario() {
             )
           : null;
 
+      const codigoIngresado =
+        normalizarCodigo(
+          productoForm.codigo
+        );
+
+      const codigoActual =
+        normalizarCodigo(
+          productoActual?.codigo
+        );
+
+      const codigoParaValidar =
+        codigoIngresado ||
+        codigoActual;
+
+      if (codigoParaValidar) {
+        const codigoDuplicado =
+          productos.find(
+            producto =>
+              producto.id !==
+                editandoId &&
+              normalizarCodigo(
+                producto.codigo
+              ) ===
+                codigoParaValidar
+          );
+
+        if (codigoDuplicado) {
+          return setError(
+            `El código ${codigoParaValidar} ya pertenece a "${codigoDuplicado.nombre}".`
+          );
+        }
+      }
+
       if (
         productoActual
       ) {
@@ -1444,6 +1580,15 @@ function Inventario() {
       try {
         setError("");
         setExito("");
+
+        let codigoFinal =
+          codigoIngresado ||
+          codigoActual;
+
+        if (!codigoFinal) {
+          codigoFinal =
+            await reservarCodigoAutomatico();
+        }
 
         let urlImagen =
           typeof productoForm.imagen ===
@@ -1484,6 +1629,14 @@ function Inventario() {
           );
 
         const datosBase = {
+          codigo:
+            codigoFinal,
+
+          codigoNormalizado:
+            normalizarCodigo(
+              codigoFinal
+            ),
+
           nombre,
 
           nombreLower:
@@ -2351,7 +2504,7 @@ function Inventario() {
 
                 <input
                   type="text"
-                  placeholder="Nombre o categoría..."
+                  placeholder="Código, nombre o categoría..."
                   value={
                     busqueda
                   }
@@ -2999,6 +3152,35 @@ function Inventario() {
             </div>
 
             <div className="form-grid">
+
+              <div className="form-field">
+
+                <label>
+                  Código / SKU
+                </label>
+
+                <input
+                  name="codigo"
+                  placeholder="Ej: AUD-001"
+                  value={
+                    productoForm.codigo
+                  }
+                  onChange={
+                    handleChange
+                  }
+                />
+
+                <span
+                  className="inv-subtle"
+                  style={{
+                    marginTop: 5,
+                    fontSize: 11
+                  }}
+                >
+                  Déjalo vacío y Ordexa generará uno automáticamente.
+                </span>
+
+              </div>
 
               <div className="form-field">
 
@@ -4502,6 +4684,21 @@ function ProductoCard({
                     producto.nombre
                   }
                 </strong>
+
+                <span
+                  className="badge"
+                  title="Código único del producto"
+                  style={{
+                    color: "#60a5fa",
+                    fontFamily: "monospace",
+                    fontWeight: 800
+                  }}
+                >
+                  # {
+                    producto.codigo ||
+                    "SIN-CODIGO"
+                  }
+                </span>
 
                 <span
                   className="badge"
