@@ -1,4 +1,4 @@
-// src/pages/Clientes.jsx
+// src/pages/Proveedores.jsx
 
 import {
   useEffect,
@@ -18,9 +18,18 @@ import {
   startAt
 } from "firebase/firestore";
 
-import { db } from "../../firebaseClient.js";
-import { Link } from "react-router-dom";
-import { useTenant } from "../tenant/TenantProvider";
+import {
+  Link
+} from "react-router-dom";
+
+import {
+  db
+} from "../../firebaseClient.js";
+
+import {
+  useTenant
+} from "../tenant/TenantProvider";
+
 import AppMenu from "../components/AppMenu.jsx";
 
 import "./inventario.css";
@@ -32,20 +41,9 @@ const SEARCH_LIMIT = 25;
    HELPERS
 ========================================================= */
 
-const norm = value =>
-  String(value || "")
-    .trim();
-
-const slug = value =>
-  norm(value)
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-
 const normalizarNombreBusqueda = value =>
-  norm(value)
+  String(value || "")
+    .trim()
     .toLowerCase()
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
@@ -65,12 +63,12 @@ const esBusquedaDocumento = value =>
    COMPONENTE
 ========================================================= */
 
-export default function Clientes() {
+export default function Proveedores() {
   const {
     empresa
   } = useTenant();
 
-  const clientesCol =
+  const proveedoresCol =
     useMemo(() => {
       if (!empresa?.id) {
         return null;
@@ -80,15 +78,15 @@ export default function Clientes() {
         db,
         "empresas",
         empresa.id,
-        "clientes"
+        "proveedores"
       );
     }, [
       empresa?.id
     ]);
 
   const [
-    clientes,
-    setClientes
+    proveedores,
+    setProveedores
   ] = useState([]);
 
   const [
@@ -126,10 +124,6 @@ export default function Clientes() {
     setError
   ] = useState("");
 
-  /* =======================================================
-     LISTADO PAGINADO
-  ======================================================= */
-
   const normalizarSnap =
     snapDoc => ({
       id:
@@ -137,25 +131,33 @@ export default function Clientes() {
       ...snapDoc.data()
     });
 
+  /* =======================================================
+     LISTADO PAGINADO
+  ======================================================= */
+
   const cargarPrimeraPagina =
     async () => {
-      if (!clientesCol) {
+      if (!proveedoresCol) {
         return;
       }
 
       try {
-        setCargando(true);
-        setError("");
+        setCargando(
+          true
+        );
+
+        setError(
+          ""
+        );
 
         /*
-         * Usamos el ID del documento para poder
-         * incluir clientes antiguos aunque todavía
-         * no tengan nombreBusqueda.
+         * Ordenamos por ID para incluir también proveedores
+         * antiguos que todavía no tengan nombreBusqueda.
          */
         const snap =
           await getDocs(
             query(
-              clientesCol,
+              proveedoresCol,
               orderBy(
                 documentId()
               ),
@@ -165,7 +167,7 @@ export default function Clientes() {
             )
           );
 
-        setClientes(
+        setProveedores(
           snap.docs.map(
             normalizarSnap
           )
@@ -187,18 +189,20 @@ export default function Clientes() {
         console.error(e);
 
         setError(
-          "No se pudieron cargar los clientes."
+          "No se pudieron cargar los proveedores."
         );
 
       } finally {
-        setCargando(false);
+        setCargando(
+          false
+        );
       }
     };
 
   const cargarMas =
     async () => {
       if (
-        !clientesCol ||
+        !proveedoresCol ||
         !ultimoDoc ||
         cargando
       ) {
@@ -206,13 +210,18 @@ export default function Clientes() {
       }
 
       try {
-        setCargando(true);
-        setError("");
+        setCargando(
+          true
+        );
+
+        setError(
+          ""
+        );
 
         const snap =
           await getDocs(
             query(
-              clientesCol,
+              proveedoresCol,
               orderBy(
                 documentId()
               ),
@@ -225,7 +234,7 @@ export default function Clientes() {
             )
           );
 
-        setClientes(
+        setProveedores(
           prev => [
             ...prev,
             ...snap.docs.map(
@@ -250,22 +259,24 @@ export default function Clientes() {
         console.error(e);
 
         setError(
-          "No se pudieron cargar más clientes."
+          "No se pudieron cargar más proveedores."
         );
 
       } finally {
-        setCargando(false);
+        setCargando(
+          false
+        );
       }
     };
 
   useEffect(() => {
     cargarPrimeraPagina();
   }, [
-    clientesCol
+    proveedoresCol
   ]);
 
   /* =======================================================
-     BÚSQUEDA REMOTA ESCALABLE
+     BÚSQUEDA REMOTA
   ======================================================= */
 
   const buscarPrefijo =
@@ -274,7 +285,7 @@ export default function Clientes() {
       prefijo
     ) => {
       if (
-        !clientesCol ||
+        !proveedoresCol ||
         !prefijo
       ) {
         return [];
@@ -283,7 +294,7 @@ export default function Clientes() {
       const snap =
         await getDocs(
           query(
-            clientesCol,
+            proveedoresCol,
             orderBy(
               campo
             ),
@@ -306,16 +317,19 @@ export default function Clientes() {
 
   const buscarRemoto =
     async texto => {
+      const limpio =
+        String(texto || "")
+          .trim();
+
       if (
-        !texto ||
-        texto.trim().length < 2
+        limpio.length < 2
       ) {
         return [];
       }
 
       const porDocumento =
         esBusquedaDocumento(
-          texto
+          limpio
         );
 
       const consultas =
@@ -324,70 +338,63 @@ export default function Clientes() {
               buscarPrefijo(
                 "documentoNormalizado",
                 normalizarDocumento(
-                  texto
+                  limpio
                 )
               ),
 
-              /*
-               * Compatibilidad con clientes viejos.
-               */
               buscarPrefijo(
                 "documento",
-                norm(
-                  texto
-                )
+                limpio
               )
             ]
           : [
               buscarPrefijo(
                 "nombreBusqueda",
                 normalizarNombreBusqueda(
-                  texto
+                  limpio
                 )
               ),
 
               /*
-               * Compatibilidad con la estructura
-               * anterior de Ordexa.
+               * Compatibilidad con proveedores
+               * creados antes de esta mejora.
                */
               buscarPrefijo(
                 "nombreLower",
-                slug(
-                  texto
-                )
+                limpio.toLowerCase()
               )
             ];
 
-      const resultados =
+      const respuestas =
         await Promise.allSettled(
           consultas
         );
 
-      const map =
+      const unicos =
         new Map();
 
       for (
-        const resultado
-        of resultados
+        const respuesta
+        of respuestas
       ) {
         if (
-          resultado.status ===
+          respuesta.status ===
           "fulfilled"
         ) {
           for (
-            const cliente
-            of resultado.value
+            const proveedor
+            of respuesta.value
           ) {
-            map.set(
-              cliente.id,
-              cliente
+            unicos.set(
+              proveedor.id,
+              proveedor
             );
           }
         }
       }
 
       return Array.from(
-        map.values()
+        unicos.values()
       ).slice(
         0,
         SEARCH_LIMIT
@@ -401,8 +408,14 @@ export default function Clientes() {
     if (
       texto.length < 2
     ) {
-      setResultadosBusqueda([]);
-      setBuscando(false);
+      setResultadosBusqueda(
+        []
+      );
+
+      setBuscando(
+        false
+      );
+
       return;
     }
 
@@ -413,17 +426,22 @@ export default function Clientes() {
       setTimeout(
         async () => {
           try {
-            setBuscando(true);
-            setError("");
+            setBuscando(
+              true
+            );
 
-            const resultados =
+            setError(
+              ""
+            );
+
+            const lista =
               await buscarRemoto(
                 texto
               );
 
             if (!cancelado) {
               setResultadosBusqueda(
-                resultados
+                lista
               );
             }
 
@@ -431,7 +449,10 @@ export default function Clientes() {
             console.error(e);
 
             if (!cancelado) {
-              setResultadosBusqueda([]);
+              setResultadosBusqueda(
+                []
+              );
+
               setError(
                 "No se pudo completar la búsqueda."
               );
@@ -439,7 +460,9 @@ export default function Clientes() {
 
           } finally {
             if (!cancelado) {
-              setBuscando(false);
+              setBuscando(
+                false
+              );
             }
           }
         },
@@ -454,9 +477,10 @@ export default function Clientes() {
         timer
       );
     };
+
   }, [
     qStr,
-    clientesCol
+    proveedoresCol
   ]);
 
   const usandoBusqueda =
@@ -465,7 +489,7 @@ export default function Clientes() {
   const listaMostrada =
     usandoBusqueda
       ? resultadosBusqueda
-      : clientes;
+      : proveedores;
 
   /* =======================================================
      EMPRESA
@@ -474,11 +498,13 @@ export default function Clientes() {
   if (!empresa?.id) {
     return (
       <div className="inv-root">
+
         <header className="inv-header">
           <h1>
             Cargando empresa…
           </h1>
         </header>
+
       </div>
     );
   }
@@ -495,13 +521,15 @@ export default function Clientes() {
       <header className="inv-header">
 
         <div>
+
           <h1>
-            Clientes
+            🏢 Proveedores
           </h1>
 
           <p className="inv-subtle">
-            Consulta clientes e historial sin descargar toda la base de datos.
+            Consulta proveedores sin descargar toda la base de datos.
           </p>
+
         </div>
 
         <div
@@ -512,8 +540,15 @@ export default function Clientes() {
           }}
         >
           <Link
-            className="btn"
+            to="/compras"
+            className="btn btn-primary"
+          >
+            🛒 Nueva compra
+          </Link>
+
+          <Link
             to="/"
+            className="btn"
           >
             ← Inventario
           </Link>
@@ -538,7 +573,7 @@ export default function Clientes() {
           </span>
 
           <input
-            placeholder="Buscar por nombre o documento…"
+            placeholder="Buscar por nombre o NIT / documento…"
             value={
               qStr
             }
@@ -560,7 +595,7 @@ export default function Clientes() {
             ? buscando
               ? "Buscando…"
               : `${listaMostrada.length} resultado(s)`
-            : `${clientes.length} cargado(s)`}
+            : `${proveedores.length} cargado(s)`}
         </span>
 
       </section>
@@ -595,7 +630,7 @@ export default function Clientes() {
                     fontSize: 11
                   }}
                 >
-                  Se cargan {PAGE_SIZE} clientes por página para mantener Ordexa rápida incluso con bases grandes.
+                  Se cargan {PAGE_SIZE} proveedores por página para mantener Ordexa rápida con bases grandes.
                 </p>
               )}
             </div>
@@ -605,21 +640,26 @@ export default function Clientes() {
           <div className="card-body">
 
             {error && (
+
               <div
                 className="toast toast-error"
                 style={{
-                  position: "static",
+                  position:
+                    "static",
                   marginBottom: 12
                 }}
               >
                 {error}
               </div>
+
             )}
 
             {qStr.trim().length === 1 && (
+
               <p className="inv-subtle">
                 Escribe al menos 2 caracteres para buscar.
               </p>
+
             )}
 
             {!buscando &&
@@ -629,24 +669,24 @@ export default function Clientes() {
                 style={{
                   textAlign: "center",
                   padding:
-                    "38px 20px"
+                    "40px 20px"
                 }}
               >
                 <div
                   style={{
-                    fontSize: 32,
-                    marginBottom: 8
+                    fontSize: 34,
+                    marginBottom: 9
                   }}
                 >
-                  👤
+                  🏢
                 </div>
 
                 <strong>
-                  Sin clientes coincidentes
+                  Sin proveedores coincidentes
                 </strong>
 
                 <p className="inv-subtle">
-                  Prueba con el nombre o el documento.
+                  Prueba con el nombre o el NIT / documento.
                 </p>
               </div>
 
@@ -655,35 +695,36 @@ export default function Clientes() {
               <ul className="product-list">
 
                 {listaMostrada.map(
-                  c => (
+                  proveedor => (
 
                     <li
-                      className="product-item"
                       key={
-                        c.id
+                        proveedor.id
                       }
+                      className="product-item"
                       style={{
                         gridTemplateColumns:
                           "1fr auto"
                       }}
                     >
-
                       <div className="product-info">
 
                         <div className="product-title-row">
+
                           <strong>
-                            {c.nombre ||
-                              "Cliente sin nombre"}
+                            {proveedor.nombre ||
+                              "Proveedor sin nombre"}
                           </strong>
+
                         </div>
 
                         <div className="product-meta">
 
                           <span>
-                            Documento:{" "}
+                            NIT / Documento:{" "}
 
                             <b>
-                              {c.documento ||
+                              {proveedor.documento ||
                                 "—"}
                             </b>
                           </span>
@@ -692,7 +733,7 @@ export default function Clientes() {
                             ID:{" "}
 
                             <b>
-                              {c.id}
+                              {proveedor.id}
                             </b>
                           </span>
 
@@ -704,9 +745,14 @@ export default function Clientes() {
 
                         <Link
                           className="btn btn-small"
-                          to={`/clientes/${c.id}`}
+                          to={`/historial-compras?proveedor=${encodeURIComponent(
+                            proveedor.id
+                          )}&nombre=${encodeURIComponent(
+                            proveedor.nombre ||
+                            "Proveedor"
+                          )}`}
                         >
-                          Ver historial
+                          📑 Ver compras
                         </Link>
 
                       </div>
@@ -740,7 +786,7 @@ export default function Clientes() {
                 >
                   {cargando
                     ? "Cargando..."
-                    : "Cargar más clientes"}
+                    : "Cargar más proveedores"}
                 </button>
               </div>
 

@@ -8,7 +8,13 @@ import {
   getDocs,
   doc,
   serverTimestamp,
-  runTransaction
+  runTransaction,
+  query,
+  orderBy,
+  startAt,
+  endAt,
+  limit,
+  where
 } from "firebase/firestore";
 
 import { useNavigate, Link } from "react-router-dom";
@@ -61,6 +67,23 @@ const slug = s =>
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "") ||
   "sin-id";
+
+const normalizarNombreBusqueda = value =>
+  norm(value)
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+
+const normalizarDocumento = value =>
+  String(value || "")
+    .replace(/[^0-9a-zA-Z]/g, "")
+    .toLowerCase();
+
+const esBusquedaDocumento = value =>
+  /[0-9]/.test(
+    String(value || "")
+  );
 
 const formatMoney = value =>
   `$${Number(value || 0).toLocaleString("es-CO", {
@@ -202,6 +225,22 @@ export default function Ventas() {
   const cantidadRef =
     useRef(null);
 
+  /*
+   * Borrador temporal de venta:
+   * mantiene la venta mientras navegas por Ordexa
+   * dentro de esta misma pestaña.
+   */
+  const borradorRestauradoRef =
+    useRef(false);
+
+  const productoPendienteRestaurarRef =
+    useRef(null);
+
+  const [
+    borradorRecuperado,
+    setBorradorRecuperado
+  ] = useState(false);
+
   /* =======================================================
      ESTADOS
   ======================================================= */
@@ -215,9 +254,36 @@ export default function Ventas() {
     cliente,
     setCliente
   ] = useState({
+    id: null,
     nombre: "",
-    documento: ""
+    documento: "",
+    existente: false
   });
+
+  const [
+    busquedaCliente,
+    setBusquedaCliente
+  ] = useState("");
+
+  const [
+    resultadosClientes,
+    setResultadosClientes
+  ] = useState([]);
+
+  const [
+    buscandoClientes,
+    setBuscandoClientes
+  ] = useState(false);
+
+  const [
+    modoClienteNuevo,
+    setModoClienteNuevo
+  ] = useState(false);
+
+  const [
+    clientesRecientes,
+    setClientesRecientes
+  ] = useState([]);
 
   const [
     items,
@@ -279,6 +345,303 @@ export default function Ventas() {
   ] = useState("");
 
   /* =======================================================
+     BORRADOR DE VENTA
+
+     Usamos sessionStorage para que:
+     - puedas ir a Inventario, Cartera, Clientes, etc.
+     - volver a Ventas sin perder la venta
+     - incluso un refresh de esta pestaña la recupere
+
+     Al cerrar la pestaña, el borrador desaparece.
+  ======================================================= */
+
+  const borradorKey =
+    empresa?.id &&
+    user?.uid
+      ? `ordexa_borrador_venta_${empresa.id}_${user.uid}`
+      : null;
+
+  /*
+   * Restauramos una sola vez por montaje.
+   */
+  useEffect(() => {
+    if (
+      !borradorKey ||
+      borradorRestauradoRef.current
+    ) {
+      return;
+    }
+
+    borradorRestauradoRef.current =
+      true;
+
+    try {
+      const guardado =
+        sessionStorage.getItem(
+          borradorKey
+        );
+
+      if (!guardado) {
+        return;
+      }
+
+      const borrador =
+        JSON.parse(
+          guardado
+        );
+
+      if (
+        borrador?.cliente &&
+        typeof borrador.cliente ===
+          "object"
+      ) {
+        setCliente({
+          id:
+            borrador.cliente.id ??
+            null,
+
+          nombre:
+            borrador.cliente.nombre ||
+            "",
+
+          documento:
+            borrador.cliente.documento ||
+            "",
+
+          existente:
+            Boolean(
+              borrador.cliente.existente
+            )
+        });
+      }
+
+      setModoClienteNuevo(
+        Boolean(
+          borrador?.modoClienteNuevo
+        )
+      );
+
+      setBusquedaCliente(
+        borrador?.busquedaCliente ||
+        ""
+      );
+
+      if (
+        Array.isArray(
+          borrador?.items
+        )
+      ) {
+        setItems(
+          borrador.items
+        );
+      }
+
+      setTipoPago(
+        borrador?.tipoPago ===
+          "CREDITO"
+          ? "CREDITO"
+          : "CONTADO"
+      );
+
+      setFechaVencimiento(
+        borrador?.fechaVencimiento ||
+        ""
+      );
+
+      setCantidad(
+        Number(
+          borrador?.cantidad ||
+          1
+        )
+      );
+
+      setPrecioVenta(
+        borrador?.precioVenta ||
+        ""
+      );
+
+      productoPendienteRestaurarRef.current =
+        borrador?.productoSeleccionadoId ||
+        null;
+
+      setBorradorRecuperado(
+        Boolean(
+          (
+            Array.isArray(
+              borrador?.items
+            ) &&
+            borrador.items.length > 0
+          ) ||
+          borrador?.cliente?.id ||
+          borrador?.cliente?.nombre ||
+          borrador?.tipoPago ===
+            "CREDITO" ||
+          borrador?.productoSeleccionadoId
+        )
+      );
+
+    } catch (e) {
+      console.warn(
+        "No se pudo restaurar el borrador de venta.",
+        e
+      );
+
+      sessionStorage.removeItem(
+        borradorKey
+      );
+    }
+  }, [
+    borradorKey
+  ]);
+
+  /*
+   * Guardado automático del borrador.
+   * Solo empieza después de haber intentado restaurarlo,
+   * para no sobrescribir una venta pendiente con valores vacíos.
+   */
+  useEffect(() => {
+    if (
+      !borradorKey ||
+      !borradorRestauradoRef.current ||
+      guardando
+    ) {
+      return;
+    }
+
+    const tieneContenido =
+      items.length > 0 ||
+      Boolean(
+        cliente.id ||
+        norm(cliente.nombre) ||
+        norm(cliente.documento)
+      ) ||
+      modoClienteNuevo ||
+      tipoPago === "CREDITO" ||
+      Boolean(
+        productoSeleccionado?.id
+      );
+
+    if (
+      !tieneContenido
+    ) {
+      sessionStorage.removeItem(
+        borradorKey
+      );
+
+      return;
+    }
+
+    const borrador = {
+      version: 1,
+
+      cliente: {
+        id:
+          cliente.id ??
+          null,
+
+        nombre:
+          cliente.nombre ||
+          "",
+
+        documento:
+          cliente.documento ||
+          "",
+
+        existente:
+          Boolean(
+            cliente.existente
+          )
+      },
+
+      modoClienteNuevo,
+
+      busquedaCliente,
+
+      items,
+
+      tipoPago,
+
+      fechaVencimiento,
+
+      productoSeleccionadoId:
+        productoSeleccionado?.id ||
+        null,
+
+      cantidad,
+
+      precioVenta,
+
+      guardadoEn:
+        Date.now()
+    };
+
+    try {
+      sessionStorage.setItem(
+        borradorKey,
+        JSON.stringify(
+          borrador
+        )
+      );
+    } catch (e) {
+      console.warn(
+        "No se pudo guardar el borrador de venta.",
+        e
+      );
+    }
+  }, [
+    borradorKey,
+    cliente,
+    modoClienteNuevo,
+    busquedaCliente,
+    items,
+    tipoPago,
+    fechaVencimiento,
+    productoSeleccionado?.id,
+    cantidad,
+    precioVenta,
+    guardando
+  ]);
+
+  /*
+   * Si había un producto seleccionado antes de navegar,
+   * lo restauramos usando el producto FRESCO que acabamos
+   * de leer de Firestore. Así si hiciste un ajuste de stock,
+   * ves el stock nuevo y no una copia vieja.
+   */
+  useEffect(() => {
+    const productoId =
+      productoPendienteRestaurarRef.current;
+
+    if (
+      !productoId ||
+      productos.length === 0
+    ) {
+      return;
+    }
+
+    const producto =
+      productos.find(
+        p =>
+          p.id ===
+          productoId
+      );
+
+    productoPendienteRestaurarRef.current =
+      null;
+
+    if (
+      producto &&
+      producto.activo !== false
+    ) {
+      setProductoSeleccionado(
+        producto
+      );
+    }
+  }, [
+    productos
+  ]);
+
+  /* =======================================================
      STOCK DISPONIBLE DENTRO DE LA VENTA ACTUAL
 
      Firestore conserva el stock real hasta que se registra
@@ -336,6 +699,464 @@ export default function Ventas() {
           productoSeleccionado
         )
       : 0;
+
+  /* =======================================================
+     CLIENTES ESCALABLES
+     - No descargamos toda la colección.
+     - Buscamos por prefijo y traemos máximo 8 resultados.
+     - Compatibilidad con clientes antiguos:
+       nombreLower / documento.
+  ======================================================= */
+
+  const recientesKey =
+    empresa?.id
+      ? `ordexa_clientes_recientes_${empresa.id}`
+      : null;
+
+  useEffect(() => {
+    if (!recientesKey) {
+      setClientesRecientes([]);
+      return;
+    }
+
+    try {
+      const guardados =
+        JSON.parse(
+          localStorage.getItem(
+            recientesKey
+          ) || "[]"
+        );
+
+      setClientesRecientes(
+        Array.isArray(guardados)
+          ? guardados.slice(0, 5)
+          : []
+      );
+    } catch {
+      setClientesRecientes([]);
+    }
+  }, [recientesKey]);
+
+  const guardarClienteReciente =
+    clienteGuardado => {
+      if (
+        !recientesKey ||
+        !clienteGuardado?.id
+      ) {
+        return;
+      }
+
+      setClientesRecientes(prev => {
+        const siguiente = [
+          clienteGuardado,
+          ...prev.filter(
+            item =>
+              item.id !==
+              clienteGuardado.id
+          )
+        ].slice(0, 5);
+
+        localStorage.setItem(
+          recientesKey,
+          JSON.stringify(
+            siguiente
+          )
+        );
+
+        return siguiente;
+      });
+    };
+
+  const convertirCliente =
+    documentoSnap => ({
+      id:
+        documentoSnap.id,
+      ...documentoSnap.data()
+    });
+
+  const ejecutarBusquedaPrefijo =
+    async (
+      campo,
+      prefijo,
+      maximo = 8
+    ) => {
+      if (
+        !empresa?.id ||
+        !prefijo
+      ) {
+        return [];
+      }
+
+      const ref =
+        collection(
+          db,
+          "empresas",
+          empresa.id,
+          "clientes"
+        );
+
+      const snap =
+        await getDocs(
+          query(
+            ref,
+            orderBy(campo),
+            startAt(prefijo),
+            endAt(
+              `${prefijo}\uf8ff`
+            ),
+            limit(maximo)
+          )
+        );
+
+      return snap.docs.map(
+        convertirCliente
+      );
+    };
+
+  const buscarClientesRemotos =
+    async texto => {
+      if (
+        !empresa?.id ||
+        texto.trim().length < 2
+      ) {
+        return [];
+      }
+
+      const porDocumento =
+        esBusquedaDocumento(
+          texto
+        );
+
+      if (porDocumento) {
+        const documento =
+          normalizarDocumento(
+            texto
+          );
+
+        const consultas =
+          await Promise.allSettled([
+            ejecutarBusquedaPrefijo(
+              "documentoNormalizado",
+              documento
+            ),
+
+            /*
+             * Compatibilidad con los clientes
+             * creados antes de documentoNormalizado.
+             */
+            ejecutarBusquedaPrefijo(
+              "documento",
+              norm(texto)
+            )
+          ]);
+
+        const map =
+          new Map();
+
+        for (
+          const resultado
+          of consultas
+        ) {
+          if (
+            resultado.status ===
+            "fulfilled"
+          ) {
+            for (
+              const item
+              of resultado.value
+            ) {
+              map.set(
+                item.id,
+                item
+              );
+            }
+          }
+        }
+
+        return Array.from(
+          map.values()
+        ).slice(0, 8);
+      }
+
+      const nombreBusqueda =
+        normalizarNombreBusqueda(
+          texto
+        );
+
+      const nombreLegacy =
+        slug(texto);
+
+      const consultas =
+        await Promise.allSettled([
+          ejecutarBusquedaPrefijo(
+            "nombreBusqueda",
+            nombreBusqueda
+          ),
+
+          /*
+           * nombreLower en la versión antigua
+           * se guardaba como slug.
+           */
+          ejecutarBusquedaPrefijo(
+            "nombreLower",
+            nombreLegacy
+          )
+        ]);
+
+      const map =
+        new Map();
+
+      for (
+        const resultado
+        of consultas
+      ) {
+        if (
+          resultado.status ===
+          "fulfilled"
+        ) {
+          for (
+            const item
+            of resultado.value
+          ) {
+            map.set(
+              item.id,
+              item
+            );
+          }
+        }
+      }
+
+      return Array.from(
+        map.values()
+      ).slice(0, 8);
+    };
+
+  useEffect(() => {
+    if (
+      cliente.id ||
+      modoClienteNuevo
+    ) {
+      setResultadosClientes([]);
+      setBuscandoClientes(false);
+      return;
+    }
+
+    const texto =
+      busquedaCliente.trim();
+
+    if (
+      texto.length < 2
+    ) {
+      setResultadosClientes([]);
+      setBuscandoClientes(false);
+      return;
+    }
+
+    let cancelado =
+      false;
+
+    const timer =
+      setTimeout(
+        async () => {
+          try {
+            setBuscandoClientes(true);
+
+            const resultados =
+              await buscarClientesRemotos(
+                texto
+              );
+
+            if (!cancelado) {
+              setResultadosClientes(
+                resultados
+              );
+            }
+          } catch (e) {
+            console.error(
+              "Error buscando clientes:",
+              e
+            );
+
+            if (!cancelado) {
+              setResultadosClientes([]);
+            }
+          } finally {
+            if (!cancelado) {
+              setBuscandoClientes(false);
+            }
+          }
+        },
+        320
+      );
+
+    return () => {
+      cancelado =
+        true;
+
+      clearTimeout(
+        timer
+      );
+    };
+  }, [
+    busquedaCliente,
+    empresa?.id,
+    cliente.id,
+    modoClienteNuevo
+  ]);
+
+  const seleccionarCliente =
+    clienteElegido => {
+      if (!clienteElegido) {
+        return;
+      }
+
+      setCliente({
+        id:
+          clienteElegido.id,
+        nombre:
+          clienteElegido.nombre ||
+          "",
+        documento:
+          clienteElegido.documento ||
+          "",
+        existente:
+          true
+      });
+
+      setBusquedaCliente("");
+      setResultadosClientes([]);
+      setModoClienteNuevo(false);
+
+      guardarClienteReciente({
+        id:
+          clienteElegido.id,
+        nombre:
+          clienteElegido.nombre ||
+          "",
+        documento:
+          clienteElegido.documento ||
+          ""
+      });
+    };
+
+  const cambiarCliente =
+    () => {
+      setCliente({
+        id: null,
+        nombre: "",
+        documento: "",
+        existente: false
+      });
+
+      setBusquedaCliente("");
+      setResultadosClientes([]);
+      setModoClienteNuevo(false);
+    };
+
+  const iniciarClienteNuevo =
+    () => {
+      setCliente({
+        id: null,
+        nombre:
+          esBusquedaDocumento(
+            busquedaCliente
+          )
+            ? ""
+            : busquedaCliente.trim(),
+        documento:
+          esBusquedaDocumento(
+            busquedaCliente
+          )
+            ? busquedaCliente.trim()
+            : "",
+        existente:
+          false
+      });
+
+      setModoClienteNuevo(true);
+      setResultadosClientes([]);
+    };
+
+  const usarConsumidorFinal =
+    () => {
+      setCliente({
+        id: null,
+        nombre: "",
+        documento: "",
+        existente: false
+      });
+
+      setBusquedaCliente("");
+      setResultadosClientes([]);
+      setModoClienteNuevo(false);
+    };
+
+  const buscarClienteExactoPorDocumento =
+    async documento => {
+      if (
+        !empresa?.id ||
+        !documento
+      ) {
+        return null;
+      }
+
+      const documentoNormalizado =
+        normalizarDocumento(
+          documento
+        );
+
+      const ref =
+        collection(
+          db,
+          "empresas",
+          empresa.id,
+          "clientes"
+        );
+
+      const consultas =
+        await Promise.allSettled([
+          getDocs(
+            query(
+              ref,
+              where(
+                "documentoNormalizado",
+                "==",
+                documentoNormalizado
+              ),
+              limit(1)
+            )
+          ),
+
+          getDocs(
+            query(
+              ref,
+              where(
+                "documento",
+                "==",
+                norm(documento)
+              ),
+              limit(1)
+            )
+          )
+        ]);
+
+      for (
+        const resultado
+        of consultas
+      ) {
+        if (
+          resultado.status ===
+          "fulfilled" &&
+          !resultado.value.empty
+        ) {
+          return convertirCliente(
+            resultado.value.docs[0]
+          );
+        }
+      }
+
+      return null;
+    };
 
   /* =======================================================
      CARGAR PRODUCTOS
@@ -396,7 +1217,7 @@ export default function Ventas() {
         !q
           ? [...activos]
           : activos.filter(p =>
-              `${p.nombre || ""} ${
+              `${p.codigo || ""} ${p.nombre || ""} ${
                 p.categoriaNombre || ""
               }`
                 .toLowerCase()
@@ -964,6 +1785,24 @@ export default function Ventas() {
           );
         }
 
+        /*
+         * Si el vendedor decidió registrar un cliente nuevo,
+         * no permitimos guardar un documento sin nombre.
+         */
+        if (
+          modoClienteNuevo &&
+          norm(
+            cliente.documento
+          ) &&
+          !norm(
+            cliente.nombre
+          )
+        ) {
+          return setError(
+            "Ingresa el nombre del cliente antes de registrar la venta."
+          );
+        }
+
         /* ---------------------------------------------
            CRÉDITO
         --------------------------------------------- */
@@ -1041,6 +1880,16 @@ export default function Ventas() {
            CLIENTE
         --------------------------------------------- */
 
+        const tieneClienteReal =
+          Boolean(
+            norm(
+              cliente.nombre
+            ) ||
+            norm(
+              cliente.documento
+            )
+          );
+
         const nombreCliente =
           norm(
             cliente.nombre
@@ -1052,10 +1901,53 @@ export default function Ventas() {
             cliente.documento
           );
 
+        const documentoNormalizado =
+          normalizarDocumento(
+            documentoCliente
+          );
+
+        /*
+         * Si el usuario escribió un cliente nuevo con
+         * documento, verificamos antes de guardar que
+         * no exista ya en la empresa.
+         */
+        let clienteExistentePorDocumento =
+          null;
+
+        if (
+          tieneClienteReal &&
+          documentoCliente &&
+          !cliente.existente
+        ) {
+          clienteExistentePorDocumento =
+            await buscarClienteExactoPorDocumento(
+              documentoCliente
+            );
+
+          if (
+            clienteExistentePorDocumento
+          ) {
+            seleccionarCliente(
+              clienteExistentePorDocumento
+            );
+
+            return setError(
+              `Ya existe un cliente con este documento: ${clienteExistentePorDocumento.nombre}. Lo seleccionamos para que puedas revisar la venta.`
+            );
+          }
+        }
+
         const clienteId =
-          documentoCliente ||
-          slug(
-            nombreCliente
+          cliente.id ||
+          (
+            documentoNormalizado ||
+            (
+              tieneClienteReal
+                ? slug(
+                    nombreCliente
+                  )
+                : null
+            )
           );
 
         /* ---------------------------------------------
@@ -1063,13 +1955,15 @@ export default function Ventas() {
         --------------------------------------------- */
 
         const clienteRef =
-          doc(
-            db,
-            "empresas",
-            empresa.id,
-            "clientes",
-            clienteId
-          );
+          clienteId
+            ? doc(
+                db,
+                "empresas",
+                empresa.id,
+                "clientes",
+                clienteId
+              )
+            : null;
 
         const ventaRef =
           doc(
@@ -1079,6 +1973,24 @@ export default function Ventas() {
               empresa.id,
               "ventas"
             )
+          );
+
+        /*
+         * Contador independiente por empresa.
+         *
+         * Cada tenant mantiene su propia secuencia:
+         * 000001, 000002, 000003...
+         *
+         * El ID técnico de Firestore sigue siendo el mismo;
+         * numeroFactura es el consecutivo comercial visible.
+         */
+        const contadorFacturaRef =
+          doc(
+            db,
+            "empresas",
+            empresa.id,
+            "contadores",
+            "facturasVentas"
           );
 
         const cuentaCobrarRef =
@@ -1104,7 +2016,26 @@ export default function Ventas() {
 
             /*
              * Todas las lecturas se hacen primero.
+             *
+             * El contador se lee dentro de la misma transacción,
+             * así dos usuarios vendiendo al mismo tiempo no pueden
+             * recibir el mismo número de factura.
              */
+            const contadorSnap =
+              await transaction.get(
+                contadorFacturaRef
+              );
+
+            const ultimoNumeroFactura =
+              contadorSnap.exists()
+                ? Number(
+                    contadorSnap.data()?.ultimoNumero ||
+                    0
+                  )
+                : 0;
+
+            const numeroFactura =
+              ultimoNumeroFactura + 1;
 
             const productosActuales =
               [];
@@ -1223,23 +2154,14 @@ export default function Ventas() {
             }
 
             /* -----------------------------------------
-               CLIENTE
+               CONTADOR DE FACTURA
             ----------------------------------------- */
 
             transaction.set(
-              clienteRef,
+              contadorFacturaRef,
               {
-                nombre:
-                  nombreCliente,
-
-                nombreLower:
-                  slug(
-                    nombreCliente
-                  ),
-
-                documento:
-                  documentoCliente ||
-                  null,
+                ultimoNumero:
+                  numeroFactura,
 
                 updatedAt:
                   serverTimestamp()
@@ -1251,12 +2173,67 @@ export default function Ventas() {
             );
 
             /* -----------------------------------------
+               CLIENTE
+            ----------------------------------------- */
+
+            if (
+              clienteRef &&
+              tieneClienteReal
+            ) {
+              transaction.set(
+                clienteRef,
+                {
+                  nombre:
+                    nombreCliente,
+
+                  /*
+                   * Compatibilidad con la estructura anterior.
+                   */
+                  nombreLower:
+                    slug(
+                      nombreCliente
+                    ),
+
+                  /*
+                   * Campos preparados para búsquedas
+                   * escalables por prefijo.
+                   */
+                  nombreBusqueda:
+                    normalizarNombreBusqueda(
+                      nombreCliente
+                    ),
+
+                  documento:
+                    documentoCliente ||
+                    null,
+
+                  documentoNormalizado:
+                    documentoNormalizado ||
+                    null,
+
+                  updatedAt:
+                    serverTimestamp()
+                },
+                {
+                  merge:
+                    true
+                }
+              );
+            }
+
+            /* -----------------------------------------
                VENTA
             ----------------------------------------- */
 
             transaction.set(
               ventaRef,
               {
+                /*
+                 * Consecutivo comercial visible.
+                 * El formato 000001 se aplica solo al mostrarlo.
+                 */
+                numeroFactura,
+
                 clienteId,
 
                 cliente: {
@@ -1325,6 +2302,8 @@ export default function Ventas() {
                 {
                   ventaId:
                     ventaRef.id,
+
+                  numeroFactura,
 
                   clienteId,
 
@@ -1527,6 +2506,8 @@ export default function Ventas() {
                   ventaId:
                     ventaRef.id,
 
+                  numeroFactura,
+
                   clienteId,
 
                   clienteNombre:
@@ -1548,6 +2529,36 @@ export default function Ventas() {
           }
         );
 
+        if (
+          clienteId &&
+          tieneClienteReal
+        ) {
+          guardarClienteReciente({
+            id:
+              clienteId,
+            nombre:
+              nombreCliente,
+            documento:
+              documentoCliente
+          });
+        }
+
+        /*
+         * La venta ya quedó registrada.
+         * Eliminamos el borrador para que una venta nueva
+         * no recupere información de la anterior.
+         */
+        if (
+          borradorKey
+        ) {
+          sessionStorage.removeItem(
+            borradorKey
+          );
+        }
+
+        borradorRestauradoRef.current =
+          false;
+
         navigate(
           `/factura/${ventaRef.id}`
         );
@@ -1566,11 +2577,32 @@ export default function Ventas() {
     };
 
   /* =========================================================
+     ESTADO VISUAL DEL FLUJO
+  ========================================================= */
+
+  const clienteListo =
+    tipoPago === "CONTADO"
+      ? true
+      : Boolean(
+          norm(cliente.nombre) &&
+          norm(cliente.documento)
+        );
+
+  const pagoListo =
+    tipoPago === "CONTADO"
+      ? true
+      : Boolean(fechaVencimiento);
+
+  const datosVentaListos =
+    clienteListo &&
+    pagoListo;
+
+  /* =========================================================
      RENDER
   ========================================================= */
 
   return (
-    <div className="inv-root">
+    <div className="inv-root ventas-page">
 
       {/* =====================================================
           HEADER
@@ -1620,333 +2652,420 @@ export default function Ventas() {
 
       </header>
 
+      {borradorRecuperado && (
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent:
+              "space-between",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            marginBottom: 10,
+            padding:
+              "8px 11px",
+            border:
+              "1px solid rgba(59,130,246,.22)",
+            borderRadius: 10,
+            background:
+              "rgba(59,130,246,.05)",
+            fontSize: 11
+          }}
+        >
+          <span>
+            💾 Recuperamos la venta que estabas preparando.
+          </span>
+
+          <button
+            type="button"
+            className="btn btn-small"
+            onClick={() =>
+              setBorradorRecuperado(
+                false
+              )
+            }
+          >
+            Entendido
+          </button>
+        </div>
+
+      )}
+
       {/* =====================================================
-          GRID PRINCIPAL
+          FLUJO DE VENTA
       ===================================================== */}
 
-      <section className="inv-grid">
+      <div
+        className="card"
+        style={{
+          marginBottom: 14,
+          overflow: "visible"
+        }}
+      >
+        <div
+          className="card-body"
+          style={{
+            padding: 10
+          }}
+        >
+          <div
+            style={{
+              display: "grid",
+              gridTemplateColumns:
+                "repeat(3, minmax(0, 1fr))",
+              gap: 8
+            }}
+          >
+            <PasoVenta
+              numero="1"
+              titulo="Cliente y pago"
+              detalle={
+                datosVentaListos
+                  ? tipoPago === "CREDITO"
+                    ? "Cliente y crédito listos"
+                    : "Venta de contado lista"
+                  : "Completa los datos requeridos"
+              }
+              completo={
+                datosVentaListos
+              }
+            />
+
+            <PasoVenta
+              numero="2"
+              titulo="Productos"
+              detalle={
+                items.length
+                  ? `${items.length} referencia(s) • ${totalUnidades} unidad(es)`
+                  : "Agrega lo vendido"
+              }
+              completo={
+                items.length > 0
+              }
+            />
+
+            <PasoVenta
+              numero="3"
+              titulo="Confirmar"
+              detalle={
+                items.length
+                  ? `Total ${formatMoney(total)}`
+                  : "Revisa y registra"
+              }
+              completo={
+                datosVentaListos &&
+                items.length > 0
+              }
+            />
+          </div>
+        </div>
+      </div>
+
+      {error && (
+
+        <div
+          className="toast toast-error"
+          style={{
+            position: "static",
+            marginBottom: 14
+          }}
+        >
+          ⚠️ {error}
+        </div>
+
+      )}
+
+      {/* =====================================================
+          DATOS + PRODUCTOS
+      ===================================================== */}
+
+      <section
+        className="inv-grid"
+        style={{
+          alignItems: "start"
+        }}
+      >
 
         {/* =================================================
-            CLIENTE
+            1. CLIENTE Y FORMA DE PAGO
         ================================================= */}
 
-        <div className="card">
+        <div
+          className="card"
+          style={{
+            border:
+              datosVentaListos
+                ? "1px solid rgba(34,197,94,.30)"
+                : "1px solid rgba(59,130,246,.28)"
+          }}
+        >
 
-          <div className="card-header">
+          <div
+            className="card-header"
+            style={{
+              background:
+                datosVentaListos
+                  ? "rgba(34,197,94,.045)"
+                  : "rgba(59,130,246,.045)"
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent:
+                  "space-between",
+                alignItems:
+                  "flex-start",
+                gap: 10
+              }}
+            >
+              <div>
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8
+                  }}
+                >
+                  <span
+                    style={{
+                      width: 26,
+                      height: 26,
+                      borderRadius: 999,
+                      display: "grid",
+                      placeItems: "center",
+                      background:
+                        datosVentaListos
+                          ? "#22c55e"
+                          : "#3b82f6",
+                      color: "#fff",
+                      fontSize: 12,
+                      fontWeight: 900
+                    }}
+                  >
+                    {datosVentaListos
+                      ? "✓"
+                      : "1"}
+                  </span>
 
-            <h2>
-              Cliente
-            </h2>
+                  <h2
+                    style={{
+                      margin: 0
+                    }}
+                  >
+                    Cliente y pago
+                  </h2>
+                </div>
 
-            {tipoPago ===
-              "CREDITO" && (
+                <p
+                  className="inv-subtle"
+                  style={{
+                    margin:
+                      "4px 0 0",
+                    fontSize: 12
+                  }}
+                >
+                  Selecciona el cliente y define cómo paga.
+                </p>
+              </div>
 
               <span
                 className="badge"
                 style={{
-                  color: "#f59e0b"
+                  color:
+                    tipoPago === "CREDITO"
+                      ? "#f59e0b"
+                      : "#22c55e"
                 }}
               >
-                Obligatorio para crédito
+                {tipoPago === "CREDITO"
+                  ? "📅 Crédito"
+                  : "💵 Contado"}
               </span>
-
-            )}
-
+            </div>
           </div>
 
-          <div className="card-body form-grid">
+          <div
+            className="card-body"
+            style={{
+              padding: 16
+            }}
+          >
 
-            <div className="form-field">
-
-              <label>
-                Nombre
-                {tipoPago ===
-                  "CREDITO"
-                  ? " *"
-                  : ""}
-              </label>
-
-              <input
-                placeholder={
-                  tipoPago ===
-                  "CREDITO"
-                    ? "Nombre del cliente"
-                    : "Consumidor final"
-                }
-                value={
-                  cliente.nombre
-                }
-                onChange={e =>
-                  setCliente({
-                    ...cliente,
-                    nombre:
-                      e.target.value
-                  })
-                }
-              />
-
-            </div>
-
-            <div className="form-field">
-
-              <label>
-                Documento
-                {tipoPago ===
-                  "CREDITO"
-                  ? " *"
-                  : ""}
-              </label>
-
-              <input
-                placeholder="CC / NIT"
-                value={
-                  cliente.documento
-                }
-                onChange={e =>
-                  setCliente({
-                    ...cliente,
-                    documento:
-                      e.target.value
-                  })
-                }
-              />
-
-            </div>
-
-          </div>
-
-        </div>
-
-        {/* =================================================
-            FORMA DE PAGO
-        ================================================= */}
-
-        <div className="card">
-
-          <div className="card-header">
-
-            <div>
-
-              <h2>
-                Forma de pago
-              </h2>
-
-              <p
-                className="inv-subtle"
-                style={{
-                  margin: "4px 0 0"
-                }}
-              >
-                Define si la venta se paga ahora o queda en cartera.
-              </p>
-
-            </div>
-
-          </div>
-
-          <div className="card-body">
+            {/* CLIENTE */}
 
             <div
               style={{
-                display: "grid",
-                gridTemplateColumns:
-                  "repeat(auto-fit, minmax(180px, 1fr))",
-                gap: 12
+                fontSize: 11,
+                fontWeight: 800,
+                color: "var(--muted)",
+                textTransform:
+                  "uppercase",
+                letterSpacing: ".05em",
+                marginBottom: 9
               }}
             >
-
-              {/* CONTADO */}
-
-              <button
-                type="button"
-                onClick={() =>
-                  seleccionarTipoPago(
-                    "CONTADO"
-                  )
-                }
-                style={{
-                  textAlign: "left",
-                  cursor: "pointer",
-                  borderRadius: 18,
-                  padding: 16,
-
-                  border:
-                    tipoPago ===
-                    "CONTADO"
-                      ? "2px solid #22c55e"
-                      : "1px solid var(--border)",
-
-                  background:
-                    tipoPago ===
-                    "CONTADO"
-                      ? "rgba(34,197,94,.10)"
-                      : "rgba(255,255,255,.025)",
-
-                  color: "var(--text)",
-                  transition:
-                    "all .15s ease"
-                }}
-              >
-
-                <div
-                  style={{
-                    fontSize: 25,
-                    marginBottom: 8
-                  }}
-                >
-                  💵
-                </div>
-
-                <strong
-                  style={{
-                    display: "block",
-                    fontSize: 17
-                  }}
-                >
-                  Contado
-                </strong>
-
-                <span
-                  className="inv-subtle"
-                  style={{
-                    display: "block",
-                    marginTop: 5
-                  }}
-                >
-                  El cliente paga inmediatamente.
-                </span>
-
-                {tipoPago ===
-                  "CONTADO" && (
-
-                  <span
-                    style={{
-                      display:
-                        "inline-block",
-                      marginTop: 10,
-                      fontSize: 12,
-                      fontWeight: 800,
-                      color: "#22c55e"
-                    }}
-                  >
-                    ✓ Seleccionado
-                  </span>
-
-                )}
-
-              </button>
-
-              {/* CRÉDITO */}
-
-              <button
-                type="button"
-                onClick={() =>
-                  seleccionarTipoPago(
-                    "CREDITO"
-                  )
-                }
-                style={{
-                  textAlign: "left",
-                  cursor: "pointer",
-                  borderRadius: 18,
-                  padding: 16,
-
-                  border:
-                    tipoPago ===
-                    "CREDITO"
-                      ? "2px solid #f59e0b"
-                      : "1px solid var(--border)",
-
-                  background:
-                    tipoPago ===
-                    "CREDITO"
-                      ? "rgba(245,158,11,.10)"
-                      : "rgba(255,255,255,.025)",
-
-                  color: "var(--text)",
-                  transition:
-                    "all .15s ease"
-                }}
-              >
-
-                <div
-                  style={{
-                    fontSize: 25,
-                    marginBottom: 8
-                  }}
-                >
-                  📅
-                </div>
-
-                <strong
-                  style={{
-                    display: "block",
-                    fontSize: 17
-                  }}
-                >
-                  Crédito
-                </strong>
-
-                <span
-                  className="inv-subtle"
-                  style={{
-                    display: "block",
-                    marginTop: 5
-                  }}
-                >
-                  El saldo queda pendiente en cartera.
-                </span>
-
-                {tipoPago ===
-                  "CREDITO" && (
-
-                  <span
-                    style={{
-                      display:
-                        "inline-block",
-                      marginTop: 10,
-                      fontSize: 12,
-                      fontWeight: 800,
-                      color: "#f59e0b"
-                    }}
-                  >
-                    ✓ Seleccionado
-                  </span>
-
-                )}
-
-              </button>
-
+              Cliente
             </div>
 
-            {tipoPago ===
-              "CREDITO" && (
+            {cliente.id ? (
 
               <div
                 style={{
-                  marginTop: 18,
-                  padding: 16,
+                  display: "flex",
+                  justifyContent:
+                    "space-between",
+                  alignItems: "center",
+                  gap: 10,
+                  flexWrap: "wrap",
+                  padding: 11,
                   border:
-                    "1px solid var(--border)",
-                  borderRadius: 16,
+                    "1px solid rgba(34,197,94,.28)",
+                  borderRadius: 12,
                   background:
-                    "rgba(245,158,11,.055)"
+                    "rgba(34,197,94,.05)"
                 }}
               >
+                <div>
+                  <strong>
+                    {cliente.nombre}
+                  </strong>
 
-                <div className="form-field">
+                  <div
+                    className="inv-subtle"
+                    style={{
+                      marginTop: 3,
+                      fontSize: 11
+                    }}
+                  >
+                    Documento:{" "}
+                    {cliente.documento ||
+                      "—"}
+                  </div>
+                </div>
 
-                  <label>
-                    Fecha de vencimiento *
-                  </label>
+                <button
+                  type="button"
+                  className="btn btn-small"
+                  onClick={
+                    cambiarCliente
+                  }
+                >
+                  Cambiar
+                </button>
+              </div>
+
+            ) : modoClienteNuevo ? (
+
+              <div
+                style={{
+                  padding: 11,
+                  border:
+                    "1px solid var(--border)",
+                  borderRadius: 12,
+                  background:
+                    "rgba(59,130,246,.035)"
+                }}
+              >
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent:
+                      "space-between",
+                    alignItems: "center",
+                    gap: 8,
+                    marginBottom: 9
+                  }}
+                >
+                  <strong>
+                    ➕ Cliente nuevo
+                  </strong>
+
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    onClick={
+                      cambiarCliente
+                    }
+                  >
+                    Cancelar
+                  </button>
+                </div>
+
+                <div className="form-grid">
+
+                  <div className="form-field">
+                    <label>
+                      Nombre
+                      {tipoPago === "CREDITO"
+                        ? " *"
+                        : ""}
+                    </label>
+
+                    <input
+                      autoFocus
+                      placeholder="Nombre del cliente"
+                      value={
+                        cliente.nombre
+                      }
+                      onChange={e =>
+                        setCliente(
+                          prev => ({
+                            ...prev,
+                            nombre:
+                              e.target.value
+                          })
+                        )
+                      }
+                    />
+                  </div>
+
+                  <div className="form-field">
+                    <label>
+                      Documento
+                      {tipoPago === "CREDITO"
+                        ? " *"
+                        : ""}
+                    </label>
+
+                    <input
+                      placeholder="CC / NIT"
+                      value={
+                        cliente.documento
+                      }
+                      onChange={e =>
+                        setCliente(
+                          prev => ({
+                            ...prev,
+                            documento:
+                              e.target.value
+                          })
+                        )
+                      }
+                    />
+                  </div>
+
+                </div>
+              </div>
+
+            ) : (
+
+              <>
+                <div className="input-with-icon">
+
+                  <span className="icon">
+                    🔎
+                  </span>
 
                   <input
-                    type="date"
+                    type="text"
+                    placeholder="Buscar por nombre o documento..."
                     value={
-                      fechaVencimiento
+                      busquedaCliente
                     }
                     onChange={e =>
-                      setFechaVencimiento(
+                      setBusquedaCliente(
                         e.target.value
                       )
                     }
@@ -1954,179 +3073,485 @@ export default function Ventas() {
 
                 </div>
 
+                {busquedaCliente.trim().length ===
+                  1 && (
+
+                  <p
+                    className="inv-subtle"
+                    style={{
+                      margin:
+                        "6px 0 0",
+                      fontSize: 10
+                    }}
+                  >
+                    Escribe al menos 2 caracteres.
+                  </p>
+
+                )}
+
+                {buscandoClientes && (
+
+                  <p
+                    className="inv-subtle"
+                    style={{
+                      margin:
+                        "8px 0 0",
+                      fontSize: 11
+                    }}
+                  >
+                    Buscando clientes…
+                  </p>
+
+                )}
+
+                {!buscandoClientes &&
+                  resultadosClientes.length >
+                    0 && (
+
+                  <div
+                    style={{
+                      display: "grid",
+                      gap: 6,
+                      marginTop: 8,
+                      maxHeight: 170,
+                      overflowY: "auto"
+                    }}
+                  >
+                    {resultadosClientes.map(
+                      resultado => (
+
+                        <button
+                          key={
+                            resultado.id
+                          }
+                          type="button"
+                          className="btn"
+                          onClick={() =>
+                            seleccionarCliente(
+                              resultado
+                            )
+                          }
+                          style={{
+                            display: "flex",
+                            justifyContent:
+                              "space-between",
+                            alignItems: "center",
+                            gap: 10,
+                            textAlign: "left",
+                            padding:
+                              "8px 10px"
+                          }}
+                        >
+                          <span>
+                            <strong>
+                              {resultado.nombre ||
+                                "Sin nombre"}
+                            </strong>
+
+                            <span
+                              className="inv-subtle"
+                              style={{
+                                display: "block",
+                                marginTop: 2,
+                                fontSize: 10
+                              }}
+                            >
+                              {resultado.documento ||
+                                "Sin documento"}
+                            </span>
+                          </span>
+
+                          <span>
+                            →
+                          </span>
+                        </button>
+
+                      )
+                    )}
+                  </div>
+
+                )}
+
+                {!busquedaCliente &&
+                  clientesRecientes.length >
+                    0 && (
+
+                  <div
+                    style={{
+                      marginTop: 9
+                    }}
+                  >
+                    <div
+                      className="inv-subtle"
+                      style={{
+                        marginBottom: 6,
+                        fontSize: 10
+                      }}
+                    >
+                      Clientes recientes
+                    </div>
+
+                    <div
+                      style={{
+                        display: "flex",
+                        gap: 6,
+                        flexWrap: "wrap"
+                      }}
+                    >
+                      {clientesRecientes.map(
+                        reciente => (
+
+                          <button
+                            key={
+                              reciente.id
+                            }
+                            type="button"
+                            className="btn btn-small"
+                            onClick={() =>
+                              seleccionarCliente(
+                                reciente
+                              )
+                            }
+                          >
+                            👤 {reciente.nombre}
+                          </button>
+
+                        )
+                      )}
+                    </div>
+                  </div>
+
+                )}
+
                 <div
                   style={{
                     display: "flex",
-                    justifyContent:
-                      "space-between",
-                    alignItems: "center",
-                    gap: 12,
+                    gap: 7,
                     flexWrap: "wrap",
-                    marginTop: 12
+                    marginTop: 9
                   }}
                 >
-
-                  <span className="inv-subtle">
-                    Saldo que quedará por cobrar
-                  </span>
-
-                  <strong
-                    style={{
-                      fontSize: 22,
-                      color: "#f59e0b"
-                    }}
+                  <button
+                    type="button"
+                    className="btn btn-small"
+                    onClick={
+                      iniciarClienteNuevo
+                    }
                   >
-                    {formatMoney(total)}
-                  </strong>
+                    ➕ Cliente nuevo
+                  </button>
 
+                  {tipoPago === "CONTADO" && (
+
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={
+                        usarConsumidorFinal
+                      }
+                    >
+                      👤 Consumidor final
+                    </button>
+
+                  )}
                 </div>
-
-              </div>
+              </>
 
             )}
+
+            {/* PAGO */}
+
+            <div
+              style={{
+                marginTop: 14,
+                paddingTop: 13,
+                borderTop:
+                  "1px solid var(--border)"
+              }}
+            >
+              <div
+                style={{
+                  fontSize: 11,
+                  fontWeight: 800,
+                  color: "var(--muted)",
+                  textTransform:
+                    "uppercase",
+                  letterSpacing: ".05em",
+                  marginBottom: 9
+                }}
+              >
+                Forma de pago
+              </div>
+
+              <div className="form-grid">
+
+                <div className="form-field">
+                  <label>
+                    Tipo *
+                  </label>
+
+                  <select
+                    value={
+                      tipoPago
+                    }
+                    onChange={e =>
+                      seleccionarTipoPago(
+                        e.target.value
+                      )
+                    }
+                  >
+                    <option value="CONTADO">
+                      💵 Contado
+                    </option>
+
+                    <option value="CREDITO">
+                      📅 Crédito
+                    </option>
+                  </select>
+                </div>
+
+                {tipoPago === "CREDITO" ? (
+
+                  <div className="form-field">
+                    <label>
+                      Vencimiento *
+                    </label>
+
+                    <input
+                      type="date"
+                      value={
+                        fechaVencimiento
+                      }
+                      onChange={e =>
+                        setFechaVencimiento(
+                          e.target.value
+                        )
+                      }
+                    />
+                  </div>
+
+                ) : (
+
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "end"
+                    }}
+                  >
+                    <div
+                      style={{
+                        width: "100%",
+                        minHeight: 40,
+                        padding:
+                          "9px 11px",
+                        border:
+                          "1px solid rgba(34,197,94,.25)",
+                        borderRadius: 10,
+                        background:
+                          "rgba(34,197,94,.05)",
+                        fontSize: 11
+                      }}
+                    >
+                      ✅ Pago inmediato
+                    </div>
+                  </div>
+
+                )}
+
+              </div>
+            </div>
 
           </div>
 
         </div>
 
         {/* =================================================
-            AGREGAR PRODUCTO
+            2. AGREGAR PRODUCTOS
         ================================================= */}
 
-        <div className="card">
+        <div
+          className="card"
+          style={{
+            border:
+              "1px solid rgba(139,92,246,.30)"
+          }}
+        >
 
-          <div className="card-header">
-
-            <h2>
-              Agregar producto
-            </h2>
-
-          </div>
-
-          <div className="card-body">
-
-            <div className="form-field">
-
-              <label>
-                Producto
-              </label>
-
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={() =>
-                  setModalProductos(
-                    true
-                  )
-                }
-                style={{
-                  width: "100%",
-                  justifyContent:
-                    "center",
-                  minHeight: 44,
-                  fontWeight: 700
-                }}
-              >
-                🔎 Buscar producto
-              </button>
-
-              {productoSeleccionado ? (
-
+          <div
+            className="card-header"
+            style={{
+              background:
+                "rgba(139,92,246,.045)"
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent:
+                  "space-between",
+                alignItems:
+                  "flex-start",
+                gap: 10
+              }}
+            >
+              <div>
                 <div
                   style={{
-                    marginTop: 14,
-                    border:
-                      "1px solid var(--border)",
-                    borderRadius: 18,
-                    padding: 14,
-                    background:
-                      "linear-gradient(180deg, rgba(255,255,255,.045), rgba(255,255,255,.015))"
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 8
                   }}
                 >
+                  <span
+                    style={{
+                      width: 26,
+                      height: 26,
+                      borderRadius: 999,
+                      display: "grid",
+                      placeItems: "center",
+                      background:
+                        items.length
+                          ? "#22c55e"
+                          : "#8b5cf6",
+                      color: "#fff",
+                      fontSize: 12,
+                      fontWeight: 900
+                    }}
+                  >
+                    {items.length
+                      ? "✓"
+                      : "2"}
+                  </span>
 
+                  <h2
+                    style={{
+                      margin: 0
+                    }}
+                  >
+                    Agregar productos
+                  </h2>
+                </div>
+
+                <p
+                  className="inv-subtle"
+                  style={{
+                    margin:
+                      "4px 0 0",
+                    fontSize: 12
+                  }}
+                >
+                  Selecciona cada referencia vendida.
+                </p>
+              </div>
+
+              <span className="badge">
+                {items.length} agregado(s)
+              </span>
+            </div>
+          </div>
+
+          <div
+            className="card-body"
+            style={{
+              padding: 16
+            }}
+          >
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() =>
+                setModalProductos(
+                  true
+                )
+              }
+            >
+              🔎 Buscar producto
+            </button>
+
+            {!productoSeleccionado ? (
+
+              <div
+                style={{
+                  marginTop: 12,
+                  padding:
+                    "24px 16px",
+                  textAlign: "center",
+                  border:
+                    "1px dashed var(--border)",
+                  borderRadius: 13,
+                  background:
+                    "rgba(255,255,255,.012)"
+                }}
+              >
+                <div
+                  style={{
+                    fontSize: 24,
+                    marginBottom: 6
+                  }}
+                >
+                  📦
+                </div>
+
+                <strong>
+                  Selecciona un producto
+                </strong>
+
+                <p
+                  className="inv-subtle"
+                  style={{
+                    margin:
+                      "4px 0 0",
+                    fontSize: 11
+                  }}
+                >
+                  Aquí aparecerán cantidad, precio y stock disponible.
+                </p>
+              </div>
+
+            ) : (
+
+              <>
+                <div
+                  style={{
+                    marginTop: 12,
+                    padding: 12,
+                    border:
+                      "1px solid rgba(139,92,246,.25)",
+                    borderRadius: 13,
+                    background:
+                      "rgba(139,92,246,.035)"
+                  }}
+                >
                   <div
                     style={{
                       display: "flex",
-                      gap: 14,
-                      alignItems: "center"
+                      justifyContent:
+                        "space-between",
+                      alignItems:
+                        "flex-start",
+                      gap: 10,
+                      flexWrap: "wrap"
                     }}
                   >
+                    <div>
+                      <strong
+                        style={{
+                          fontSize: 15
+                        }}
+                      >
+                        {productoSeleccionado.nombre}
+                      </strong>
 
-                    <div
-                      style={{
-                        width: 76,
-                        height: 76,
-                        borderRadius: 16,
-                        overflow: "hidden",
-                        border:
-                          "1px solid var(--border)",
-                        background:
-                          "rgba(255,255,255,.04)",
-                        display: "grid",
-                        placeItems:
-                          "center",
-                        flexShrink: 0
-                      }}
-                    >
-
-                      {productoSeleccionado.imagen ? (
-
-                        <img
-                          src={
-                            productoSeleccionado.imagen
-                          }
-                          alt={
-                            productoSeleccionado.nombre
-                          }
-                          style={{
-                            width: "100%",
-                            height: "100%",
-                            objectFit:
-                              "cover"
-                          }}
-                        />
-
-                      ) : (
-
-                        <span
-                          className="inv-subtle"
-                          style={{
-                            fontSize: 11
-                          }}
-                        >
-                          Sin imagen
-                        </span>
-
-                      )}
-
-                    </div>
-
-                    <div
-                      style={{
-                        flex: 1,
-                        minWidth: 0
-                      }}
-                    >
-
-                      <div className="product-title-row">
-
-                        <strong>
-                          {
-                            productoSeleccionado.nombre
-                          }
-                        </strong>
-
-                        <span className="badge">
-                          Seleccionado
-                        </span>
-
-                      </div>
-
-                      <div className="product-meta">
-
+                      <div
+                        className="product-meta"
+                        style={{
+                          marginTop: 5,
+                          fontSize: 10
+                        }}
+                      >
                         <span>
-                          Precio normal:{" "}
-
+                          Normal:{" "}
                           <b>
                             {formatMoney(
                               precioNormalActual
@@ -2135,8 +3560,7 @@ export default function Ventas() {
                         </span>
 
                         <span>
-                          Precio mínimo:{" "}
-
+                          Mínimo:{" "}
                           <b
                             style={{
                               color:
@@ -2151,276 +3575,236 @@ export default function Ventas() {
 
                         <span>
                           Disponible:{" "}
-
                           <b
                             style={{
                               color:
-                                stockDisponibleSeleccionado > 0
+                                stockDisponibleSeleccionado >
+                                0
                                   ? "#22c55e"
                                   : "#ef4444"
                             }}
                           >
-                            {
-                              stockDisponibleSeleccionado
-                            }
+                            {stockDisponibleSeleccionado}
                           </b>
                         </span>
-
-                        {cantidadSeleccionadaEnCarrito >
-                          0 && (
-
-                          <span>
-                            En esta venta:{" "}
-
-                            <b
-                              style={{
-                                color:
-                                  "#00b4d8"
-                              }}
-                            >
-                              {
-                                cantidadSeleccionadaEnCarrito
-                              }
-                            </b>
-                          </span>
-
-                        )}
-
                       </div>
-
                     </div>
 
-                  </div>
-
-                  {/* PRECIO EDITABLE */}
-
-                  <div
-                    style={{
-                      marginTop: 16,
-                      paddingTop: 14,
-                      borderTop:
-                        "1px solid var(--border)"
-                    }}
-                  >
-
-                    <div className="form-field">
-
-                      <label>
-                        Precio de venta
-                      </label>
-
-                      <input
-                        type="text"
-                        inputMode="numeric"
-                        value={
-                          precioVenta
-                        }
-                        onChange={e =>
-                          setPrecioVenta(
-                            formatearNumeroInput(
-                              e.target.value
-                            )
-                          )
-                        }
-                        style={{
-                          fontWeight: 800,
-                          fontSize: 18,
-
-                          borderColor:
-                            precioInvalido
-                              ? "#ef4444"
-                              : undefined
-                        }}
-                      />
-
-                    </div>
-
-                    <div
-                      style={{
-                        display: "flex",
-                        justifyContent:
-                          "space-between",
-                        gap: 10,
-                        flexWrap: "wrap",
-                        marginTop: 8
-                      }}
-                    >
+                    {cantidadSeleccionadaEnCarrito >
+                      0 && (
 
                       <span
-                        className="inv-subtle"
+                        className="badge"
                         style={{
-                          fontSize: 12
+                          color:
+                            "#00b4d8"
                         }}
                       >
-                        Mínimo permitido:{" "}
-
-                        <b
-                          style={{
-                            color:
-                              "#f59e0b"
-                          }}
-                        >
-                          {formatMoney(
-                            precioMinimoActual
-                          )}
-                        </b>
+                        🛒 {cantidadSeleccionadaEnCarrito} en carrito
                       </span>
 
-                      {descuentoPorcentajeActual >
-                        0 && (
-
-                        <span
-                          style={{
-                            fontSize: 12,
-                            fontWeight: 800,
-                            color:
-                              "#22c55e"
-                          }}
-                        >
-                          Descuento:{" "}
-                          {descuentoPorcentajeActual.toFixed(
-                            1
-                          )}
-                          %
-                        </span>
-
-                      )}
-
-                    </div>
-
-                    {precioInvalido && (
-
-                      <div
-                        style={{
-                          marginTop: 10,
-                          padding:
-                            "9px 11px",
-                          borderRadius: 10,
-                          color:
-                            "#ef4444",
-                          background:
-                            "rgba(239,68,68,.08)",
-                          border:
-                            "1px solid rgba(239,68,68,.25)",
-                          fontSize: 13,
-                          fontWeight: 700
-                        }}
-                      >
-                        ⚠️ El precio no puede ser menor que{" "}
-                        {formatMoney(
-                          precioMinimoActual
-                        )}.
-                      </div>
-
                     )}
+                  </div>
+                </div>
 
+                <div
+                  style={{
+                    display: "grid",
+                    gridTemplateColumns:
+                      "90px minmax(140px, 1fr) minmax(120px, .75fr)",
+                    gap: 9,
+                    alignItems: "end",
+                    marginTop: 11
+                  }}
+                >
+
+                  <div className="form-field">
+                    <label>
+                      Cantidad
+                    </label>
+
+                    <input
+                      ref={
+                        cantidadRef
+                      }
+                      type="number"
+                      min="1"
+                      step="1"
+                      value={
+                        cantidad
+                      }
+                      onChange={e =>
+                        setCantidad(
+                          Number(
+                            e.target.value
+                          )
+                        )
+                      }
+                    />
                   </div>
 
-                  {/* SUBTOTAL */}
+                  <div className="form-field">
+                    <label>
+                      Precio de venta
+                    </label>
+
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      value={
+                        precioVenta
+                      }
+                      onChange={e =>
+                        setPrecioVenta(
+                          formatearNumeroInput(
+                            e.target.value
+                          )
+                        )
+                      }
+                      style={{
+                        fontWeight: 800,
+                        borderColor:
+                          precioInvalido
+                            ? "#ef4444"
+                            : undefined
+                      }}
+                    />
+                  </div>
 
                   <div
                     style={{
-                      marginTop: 14,
-                      display: "flex",
-                      justifyContent:
-                        "space-between",
-                      alignItems: "center",
-                      borderTop:
+                      minHeight: 40,
+                      padding:
+                        "8px 10px",
+                      border:
                         "1px solid var(--border)",
-                      paddingTop: 12
+                      borderRadius: 10,
+                      textAlign: "right"
                     }}
                   >
-
-                    <span className="inv-subtle">
-                      Subtotal estimado
-                    </span>
-
-                    <strong
+                    <div
+                      className="inv-subtle"
                       style={{
-                        fontSize: 22
+                        fontSize: 9
                       }}
                     >
+                      Subtotal
+                    </div>
+
+                    <strong>
                       {formatMoney(
                         subtotalActual
                       )}
                     </strong>
-
                   </div>
 
                 </div>
 
-              ) : (
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent:
+                      "space-between",
+                    gap: 8,
+                    flexWrap: "wrap",
+                    marginTop: 6,
+                    fontSize: 10
+                  }}
+                >
+                  <span className="inv-subtle">
+                    Mínimo permitido:{" "}
+                    <b
+                      style={{
+                        color:
+                          "#f59e0b"
+                      }}
+                    >
+                      {formatMoney(
+                        precioMinimoActual
+                      )}
+                    </b>
+                  </span>
 
-                <p
-                  className="inv-subtle"
+                  {descuentoPorcentajeActual >
+                    0 && (
+
+                    <span
+                      style={{
+                        color:
+                          "#22c55e",
+                        fontWeight: 800
+                      }}
+                    >
+                      🏷️ {descuentoPorcentajeActual.toFixed(
+                        1
+                      )}
+                      %
+                    </span>
+
+                  )}
+                </div>
+
+                {precioInvalido && (
+
+                  <div
+                    style={{
+                      marginTop: 7,
+                      padding:
+                        "7px 9px",
+                      border:
+                        "1px solid rgba(239,68,68,.25)",
+                      borderRadius: 9,
+                      background:
+                        "rgba(239,68,68,.07)",
+                      color:
+                        "#ef4444",
+                      fontSize: 10,
+                      fontWeight: 700
+                    }}
+                  >
+                    ⚠️ El precio no puede ser menor que{" "}
+                    {formatMoney(
+                      precioMinimoActual
+                    )}.
+                  </div>
+
+                )}
+
+                <button
+                  type="button"
+                  className="btn btn-primary"
+                  onClick={
+                    agregarItem
+                  }
+                  disabled={
+                    precioInvalido
+                  }
                   style={{
                     marginTop: 10
                   }}
                 >
-                  No has seleccionado ningún producto.
-                </p>
+                  ➕ Agregar
+                </button>
 
-              )}
-
-            </div>
-
-            <div className="form-field">
-
-              <label>
-                Cantidad
-              </label>
-
-              <input
-                ref={
-                  cantidadRef
-                }
-                type="number"
-                min="1"
-                step="1"
-                value={
-                  cantidad
-                }
-                onChange={e =>
-                  setCantidad(
-                    Number(
-                      e.target.value
-                    )
-                  )
-                }
-              />
-
-            </div>
-
-            <button
-              className="btn btn-primary"
-              onClick={
-                agregarItem
-              }
-              disabled={
-                !productoSeleccionado ||
-                precioInvalido
-              }
-            >
-              ➕ Agregar al carrito
-            </button>
-
-            {error && (
-
-              <div
-                className="toast toast-error"
-                style={{
-                  position: "static",
-                  marginTop: 12
-                }}
-              >
-                {error}
-              </div>
+              </>
 
             )}
 
           </div>
 
         </div>
+
+      </section>
+
+      {/* =====================================================
+          3. DETALLE DE LA VENTA
+      ===================================================== */}
+
+      <div
+        style={{
+          marginTop: 14
+        }}
+      >
 
         {/* =================================================
             DETALLE VENTA - VISTA COMPACTA
@@ -2726,7 +4110,9 @@ export default function Ventas() {
 
         </div>
 
-      </section>
+
+
+      </div>
 
       {/* =====================================================
           MODAL PRODUCTOS
@@ -2820,7 +4206,7 @@ export default function Ventas() {
               <input
                 autoFocus
                 type="text"
-                placeholder="Buscar por nombre o categoría..."
+                placeholder="Buscar por código, nombre o categoría..."
                 value={
                   qModal
                 }
@@ -3164,3 +4550,91 @@ export default function Ventas() {
     </div>
   );
 }
+
+/* =========================================================
+   PASO VENTA
+========================================================= */
+
+function PasoVenta({
+  numero,
+  titulo,
+  detalle,
+  completo
+}) {
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 9,
+        minWidth: 0,
+        padding: "9px 10px",
+        borderRadius: 11,
+        border:
+          completo
+            ? "1px solid rgba(34,197,94,.30)"
+            : "1px solid var(--border)",
+        background:
+          completo
+            ? "rgba(34,197,94,.06)"
+            : "rgba(255,255,255,.015)"
+      }}
+    >
+      <span
+        style={{
+          width: 25,
+          height: 25,
+          flexShrink: 0,
+          borderRadius: 999,
+          display: "grid",
+          placeItems: "center",
+          background:
+            completo
+              ? "#22c55e"
+              : "var(--border)",
+          color:
+            completo
+              ? "#fff"
+              : "var(--text)",
+          fontSize: 11,
+          fontWeight: 900
+        }}
+      >
+        {completo
+          ? "✓"
+          : numero}
+      </span>
+
+      <div
+        style={{
+          minWidth: 0
+        }}
+      >
+        <strong
+          style={{
+            display: "block",
+            fontSize: 12
+          }}
+        >
+          {titulo}
+        </strong>
+
+        <span
+          className="inv-subtle"
+          style={{
+            display: "block",
+            marginTop: 1,
+            fontSize: 10,
+            overflow: "hidden",
+            textOverflow:
+              "ellipsis",
+            whiteSpace: "nowrap"
+          }}
+        >
+          {detalle}
+        </span>
+      </div>
+    </div>
+  );
+}
+

@@ -8,7 +8,9 @@ import {
 } from "react";
 
 import {
-  Link
+  Link,
+  useNavigate,
+  useSearchParams
 } from "react-router-dom";
 
 import {
@@ -17,7 +19,8 @@ import {
   query,
   orderBy,
   limit,
-  startAfter
+  startAfter,
+  where
 } from "firebase/firestore";
 
 import { db } from "../../firebaseClient.js";
@@ -124,6 +127,25 @@ export default function HistorialCompras() {
     toggle
   } = useTheme();
 
+  const navigate =
+    useNavigate();
+
+  const [
+    searchParams
+  ] = useSearchParams();
+
+  const proveedorId =
+    searchParams.get(
+      "proveedor"
+    ) ||
+    "";
+
+  const proveedorNombre =
+    searchParams.get(
+      "nombre"
+    ) ||
+    "";
+
   const restauracionInicializada =
     useRef(false);
 
@@ -167,8 +189,41 @@ export default function HistorialCompras() {
 
   const storageKey =
     empresa?.id
-      ? `ordexa_historial_compras_${empresa.id}`
+      ? `ordexa_historial_compras_${empresa.id}_${proveedorId || "todas"}`
       : null;
+
+  /* =======================================================
+     VOLVER
+  ======================================================= */
+
+  const volver = () => {
+    const indice =
+      window.history
+        .state
+        ?.idx;
+
+    if (
+      typeof indice ===
+        "number" &&
+      indice > 0
+    ) {
+      navigate(-1);
+      return;
+    }
+
+    if (
+      proveedorId
+    ) {
+      navigate(
+        "/proveedores"
+      );
+      return;
+    }
+
+    navigate(
+      "/"
+    );
+  };
 
   /* =======================================================
      COLECCIÓN
@@ -228,16 +283,37 @@ export default function HistorialCompras() {
           );
 
         const qy =
-          query(
-            comprasCol,
-            orderBy(
-              "createdAt",
-              "desc"
-            ),
-            limit(
-              limiteReal
-            )
-          );
+          proveedorId
+            ? query(
+                comprasCol,
+
+                where(
+                  "proveedorId",
+                  "==",
+                  proveedorId
+                ),
+
+                orderBy(
+                  "createdAt",
+                  "desc"
+                ),
+
+                limit(
+                  limiteReal
+                )
+              )
+            : query(
+                comprasCol,
+
+                orderBy(
+                  "createdAt",
+                  "desc"
+                ),
+
+                limit(
+                  limiteReal
+                )
+              );
 
         const snap =
           await getDocs(
@@ -269,8 +345,21 @@ export default function HistorialCompras() {
       } catch (e) {
         console.error(e);
 
+        const necesitaIndice =
+          proveedorId &&
+          String(
+            e?.message ||
+            ""
+          )
+            .toLowerCase()
+            .includes(
+              "index"
+            );
+
         setError(
-          "No se pudo cargar el historial de compras."
+          necesitaIndice
+            ? "Firebase necesita un índice para mostrar el historial por proveedor. Abre el enlace que aparece en la consola del navegador y créalo una sola vez."
+            : "No se pudo cargar el historial de compras."
         );
 
       } finally {
@@ -301,22 +390,45 @@ export default function HistorialCompras() {
         setError("");
 
         const qy =
-          query(
-            comprasCol,
+          proveedorId
+            ? query(
+                comprasCol,
 
-            orderBy(
-              "createdAt",
-              "desc"
-            ),
+                where(
+                  "proveedorId",
+                  "==",
+                  proveedorId
+                ),
 
-            startAfter(
-              ultimoDoc
-            ),
+                orderBy(
+                  "createdAt",
+                  "desc"
+                ),
 
-            limit(
-              PAGE_SIZE
-            )
-          );
+                startAfter(
+                  ultimoDoc
+                ),
+
+                limit(
+                  PAGE_SIZE
+                )
+              )
+            : query(
+                comprasCol,
+
+                orderBy(
+                  "createdAt",
+                  "desc"
+                ),
+
+                startAfter(
+                  ultimoDoc
+                ),
+
+                limit(
+                  PAGE_SIZE
+                )
+              );
 
         const snap =
           await getDocs(
@@ -351,8 +463,21 @@ export default function HistorialCompras() {
       } catch (e) {
         console.error(e);
 
+        const necesitaIndice =
+          proveedorId &&
+          String(
+            e?.message ||
+            ""
+          )
+            .toLowerCase()
+            .includes(
+              "index"
+            );
+
         setError(
-          "No se pudieron cargar más compras."
+          necesitaIndice
+            ? "Firebase necesita un índice para continuar cargando las compras de este proveedor."
+            : "No se pudieron cargar más compras."
         );
 
       } finally {
@@ -481,7 +606,8 @@ export default function HistorialCompras() {
 
   }, [
     comprasCol,
-    storageKey
+    storageKey,
+    proveedorId
   ]);
 
   /* =======================================================
@@ -629,7 +755,9 @@ export default function HistorialCompras() {
         <div>
 
           <h1>
-            📑 Historial de compras
+            {proveedorId
+              ? `📑 Compras de ${proveedorNombre || "proveedor"}`
+              : "📑 Historial de compras"}
           </h1>
 
           <p className="inv-subtle">
@@ -664,12 +792,26 @@ export default function HistorialCompras() {
               : "🌙 Oscuro"}
           </button>
 
-          <Link
-            to="/"
+          <button
+            type="button"
             className="btn"
+            onClick={
+              volver
+            }
           >
-            ← Inventario
-          </Link>
+            ← Volver
+          </button>
+
+          {proveedorId && (
+
+            <Link
+              to="/historial-compras"
+              className="btn"
+            >
+              Ver todas las compras
+            </Link>
+
+          )}
 
           <Link
             to="/compras"
@@ -703,7 +845,11 @@ export default function HistorialCompras() {
 
           <input
             type="text"
-            placeholder="Buscar por factura, proveedor o NIT..."
+            placeholder={
+              proveedorId
+                ? "Buscar dentro de las compras de este proveedor…"
+                : "Buscar por factura, proveedor o NIT..."
+            }
             value={
               busqueda
             }
@@ -734,9 +880,32 @@ export default function HistorialCompras() {
 
           <div className="card-header">
 
-            <h2>
-              Facturas de compra
-            </h2>
+            <div>
+              <h2>
+                {proveedorId
+                  ? "Compras del proveedor"
+                  : "Facturas de compra"}
+              </h2>
+
+              {proveedorId && (
+
+                <p
+                  className="inv-subtle"
+                  style={{
+                    margin:
+                      "4px 0 0",
+                    fontSize: 11
+                  }}
+                >
+                  Mostrando únicamente facturas asociadas a{" "}
+                  <b>
+                    {proveedorNombre ||
+                      proveedorId}
+                  </b>
+                </p>
+
+              )}
+            </div>
 
           </div>
 
@@ -798,11 +967,17 @@ export default function HistorialCompras() {
                       compra.tipoPago ===
                       "CREDITO";
 
+                    const anulada =
+                      compra.anulada === true ||
+                      compra.estadoPago === "ANULADA";
+
                     const pendiente =
-                      compra.estadoPago ===
-                        "PENDIENTE" ||
-                      compra.estadoPago ===
-                        "PARCIAL";
+                      !anulada && (
+                        compra.estadoPago ===
+                          "PENDIENTE" ||
+                        compra.estadoPago ===
+                          "PARCIAL"
+                      );
 
                     return (
 
@@ -822,11 +997,39 @@ export default function HistorialCompras() {
 
                           <div className="product-title-row">
 
-                            <strong>
+                            <strong
+                              style={{
+                                textDecoration:
+                                  anulada
+                                    ? "line-through"
+                                    : "none",
+                                opacity:
+                                  anulada
+                                    ? .72
+                                    : 1
+                              }}
+                            >
                               Factura{" "}
                               {compra.numeroFactura ||
                                 "—"}
                             </strong>
+
+                            {anulada && (
+
+                              <span
+                                className="badge"
+                                style={{
+                                  color: "#ef4444",
+                                  borderColor:
+                                    "rgba(239,68,68,.30)",
+                                  background:
+                                    "rgba(239,68,68,.08)"
+                                }}
+                              >
+                                🚫 ANULADA
+                              </span>
+
+                            )}
 
                             <span
                               className="badge"
@@ -842,7 +1045,8 @@ export default function HistorialCompras() {
                                 : "💵 Contado"}
                             </span>
 
-                            {pendiente ? (
+                            {!anulada && (
+                              pendiente ? (
 
                               <span
                                 className="badge"
@@ -872,6 +1076,7 @@ export default function HistorialCompras() {
                                 ✅ Pagada
                               </span>
 
+                            )
                             )}
 
                           </div>

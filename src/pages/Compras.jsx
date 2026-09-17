@@ -1,13 +1,19 @@
 // src/pages/Compras.jsx
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   collection,
   doc,
+  endAt,
   getDocs,
+  limit,
+  orderBy,
+  query,
   runTransaction,
   serverTimestamp,
-  Timestamp
+  startAt,
+  Timestamp,
+  where
 } from "firebase/firestore";
 
 import { db } from "../../firebaseClient.js";
@@ -53,6 +59,23 @@ const numero = v =>
       .replace(/,/g, ".")
   ) || 0;
 
+
+const limpiarNumero = value =>
+  String(value ?? "")
+    .replace(/[^0-9]/g, "");
+
+const formatearNumeroInput = value => {
+  const limpio =
+    limpiarNumero(value);
+
+  if (!limpio) {
+    return "";
+  }
+
+  return Number(limpio)
+    .toLocaleString("es-CO");
+};
+
 const slug = s =>
   String(s || "")
     .trim()
@@ -70,6 +93,29 @@ const hoyISO = () => {
   return `${y}-${m}-${dia}`;
 };
 
+
+const PROVEEDORES_BUSQUEDA_LIMITE = 8;
+const PROVEEDORES_RECIENTES_LIMITE = 5;
+
+const normalizarNombreBusqueda = value =>
+  String(value || "")
+    .trim()
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/\s+/g, " ");
+
+const normalizarDocumento = value =>
+  String(value || "")
+    .replace(/[^0-9a-zA-Z]/g, "")
+    .toLowerCase();
+
+const esBusquedaDocumento = value =>
+  /[0-9]/.test(
+    String(value || "")
+  );
+
+
 /* =========================================================
    COMPONENTE
 ========================================================= */
@@ -77,6 +123,22 @@ const hoyISO = () => {
 export default function Compras() {
   const { empresa, user } = useTenant();
   const { theme, toggle } = useTheme();
+
+  /*
+   * Borrador temporal de compra:
+   * conserva factura, proveedor y productos mientras
+   * navegas por Ordexa dentro de esta misma pestaña.
+   */
+  const borradorRestauradoRef =
+    useRef(false);
+
+  const productoPendienteRestaurarRef =
+    useRef(null);
+
+  const [
+    borradorRecuperado,
+    setBorradorRecuperado
+  ] = useState(false);
 
   const esClaro = theme === "light";
 
@@ -87,6 +149,544 @@ export default function Compras() {
   const superficieAcento = esClaro
     ? "#f5f8ff"
     : "rgba(59,130,246,.055)";
+
+  /* =======================================================
+     PROVEEDOR - BÚSQUEDA ESCALABLE
+
+     No descargamos toda la colección de proveedores.
+     Buscamos por prefijo con debounce y máximo 8 resultados.
+  ======================================================= */
+
+  const [
+    proveedorSeleccionado,
+    setProveedorSeleccionado
+  ] = useState(null);
+
+  const [
+    proveedorNuevo,
+    setProveedorNuevo
+  ] = useState(false);
+
+  const [
+    qProveedor,
+    setQProveedor
+  ] = useState("");
+
+  const [
+    resultadosProveedores,
+    setResultadosProveedores
+  ] = useState([]);
+
+  const [
+    buscandoProveedor,
+    setBuscandoProveedor
+  ] = useState(false);
+
+  const [
+    recientesProveedores,
+    setRecientesProveedores
+  ] = useState([]);
+
+  /* =======================================================
+     PROVEEDORES RECIENTES
+  ======================================================= */
+
+  const proveedoresRecientesKey =
+    empresa?.id
+      ? `ordexa_proveedores_recientes_${empresa.id}`
+      : null;
+
+  useEffect(() => {
+    if (!proveedoresRecientesKey) {
+      setRecientesProveedores([]);
+      return;
+    }
+
+    try {
+      const guardados =
+        JSON.parse(
+          localStorage.getItem(
+            proveedoresRecientesKey
+          ) ||
+          "[]"
+        );
+
+      setRecientesProveedores(
+        Array.isArray(guardados)
+          ? guardados.slice(
+              0,
+              PROVEEDORES_RECIENTES_LIMITE
+            )
+          : []
+      );
+    } catch {
+      setRecientesProveedores([]);
+    }
+  }, [
+    proveedoresRecientesKey
+  ]);
+
+  const guardarProveedorReciente =
+    proveedor => {
+      if (
+        !proveedoresRecientesKey ||
+        !proveedor?.id
+      ) {
+        return;
+      }
+
+      setRecientesProveedores(
+        prev => {
+          const nuevo = [
+            {
+              id:
+                proveedor.id,
+
+              nombre:
+                proveedor.nombre ||
+                "Proveedor",
+
+              documento:
+                proveedor.documento ||
+                ""
+            },
+
+            ...prev.filter(
+              p =>
+                p.id !==
+                proveedor.id
+            )
+          ].slice(
+            0,
+            PROVEEDORES_RECIENTES_LIMITE
+          );
+
+          try {
+            localStorage.setItem(
+              proveedoresRecientesKey,
+              JSON.stringify(
+                nuevo
+              )
+            );
+          } catch {
+            // No bloqueamos una compra por localStorage.
+          }
+
+          return nuevo;
+        }
+      );
+    };
+
+  /* =======================================================
+     CONSULTAS DE PROVEEDORES
+  ======================================================= */
+
+  const proveedoresCol =
+    useMemo(() => {
+      if (!empresa?.id) {
+        return null;
+      }
+
+      return collection(
+        db,
+        "empresas",
+        empresa.id,
+        "proveedores"
+      );
+    }, [
+      empresa?.id
+    ]);
+
+  const buscarProveedorPrefijo =
+    async (
+      campo,
+      prefijo
+    ) => {
+      if (
+        !proveedoresCol ||
+        !prefijo
+      ) {
+        return [];
+      }
+
+      const snap =
+        await getDocs(
+          query(
+            proveedoresCol,
+            orderBy(
+              campo
+            ),
+            startAt(
+              prefijo
+            ),
+            endAt(
+              `${prefijo}\uf8ff`
+            ),
+            limit(
+              PROVEEDORES_BUSQUEDA_LIMITE
+            )
+          )
+        );
+
+      return snap.docs.map(
+        d => ({
+          id:
+            d.id,
+          ...d.data()
+        })
+      );
+    };
+
+  const buscarProveedoresRemoto =
+    async texto => {
+      const limpio =
+        String(texto || "")
+          .trim();
+
+      if (
+        limpio.length < 2 ||
+        !proveedoresCol
+      ) {
+        return [];
+      }
+
+      const porDocumento =
+        esBusquedaDocumento(
+          limpio
+        );
+
+      /*
+       * Buscamos tanto en los campos nuevos como
+       * en los campos legacy para no perder los
+       * proveedores que ya existen en Ordexa.
+       */
+      const consultas =
+        porDocumento
+          ? [
+              buscarProveedorPrefijo(
+                "documentoNormalizado",
+                normalizarDocumento(
+                  limpio
+                )
+              ),
+
+              buscarProveedorPrefijo(
+                "documento",
+                limpio
+              )
+            ]
+          : [
+              buscarProveedorPrefijo(
+                "nombreBusqueda",
+                normalizarNombreBusqueda(
+                  limpio
+                )
+              ),
+
+              buscarProveedorPrefijo(
+                "nombreLower",
+                limpio.toLowerCase()
+              )
+            ];
+
+      const respuestas =
+        await Promise.allSettled(
+          consultas
+        );
+
+      const unicos =
+        new Map();
+
+      for (
+        const respuesta
+        of respuestas
+      ) {
+        if (
+          respuesta.status ===
+          "fulfilled"
+        ) {
+          for (
+            const proveedor
+            of respuesta.value
+          ) {
+            unicos.set(
+              proveedor.id,
+              proveedor
+            );
+          }
+        }
+      }
+
+      return Array.from(
+        unicos.values()
+      ).slice(
+        0,
+        PROVEEDORES_BUSQUEDA_LIMITE
+      );
+    };
+
+  useEffect(() => {
+    const texto =
+      qProveedor.trim();
+
+    if (
+      proveedorSeleccionado ||
+      proveedorNuevo ||
+      texto.length < 2
+    ) {
+      setResultadosProveedores([]);
+      setBuscandoProveedor(false);
+      return;
+    }
+
+    let cancelado =
+      false;
+
+    const timer =
+      setTimeout(
+        async () => {
+          try {
+            setBuscandoProveedor(true);
+
+            const lista =
+              await buscarProveedoresRemoto(
+                texto
+              );
+
+            if (!cancelado) {
+              setResultadosProveedores(
+                lista
+              );
+            }
+          } catch (e) {
+            console.error(
+              "Error buscando proveedores:",
+              e
+            );
+
+            if (!cancelado) {
+              setResultadosProveedores([]);
+            }
+          } finally {
+            if (!cancelado) {
+              setBuscandoProveedor(false);
+            }
+          }
+        },
+        320
+      );
+
+    return () => {
+      cancelado =
+        true;
+
+      clearTimeout(
+        timer
+      );
+    };
+  }, [
+    qProveedor,
+    proveedorSeleccionado,
+    proveedorNuevo,
+    proveedoresCol
+  ]);
+
+  const seleccionarProveedor =
+    proveedor => {
+      if (!proveedor) {
+        return;
+      }
+
+      setProveedorSeleccionado(
+        proveedor
+      );
+
+      setProveedorNuevo(
+        false
+      );
+
+      setQProveedor(
+        ""
+      );
+
+      setResultadosProveedores(
+        []
+      );
+
+      setFactura(
+        prev => ({
+          ...prev,
+
+          proveedorNombre:
+            proveedor.nombre ||
+            "",
+
+          proveedorDocumento:
+            proveedor.documento ||
+            ""
+        })
+      );
+
+      guardarProveedorReciente(
+        proveedor
+      );
+
+      setError(
+        ""
+      );
+    };
+
+  const limpiarProveedor =
+    () => {
+      setProveedorSeleccionado(
+        null
+      );
+
+      setProveedorNuevo(
+        false
+      );
+
+      setQProveedor(
+        ""
+      );
+
+      setResultadosProveedores(
+        []
+      );
+
+      setFactura(
+        prev => ({
+          ...prev,
+          proveedorNombre: "",
+          proveedorDocumento: ""
+        })
+      );
+    };
+
+  const iniciarProveedorNuevo =
+    () => {
+      const texto =
+        qProveedor.trim();
+
+      setProveedorSeleccionado(
+        null
+      );
+
+      setProveedorNuevo(
+        true
+      );
+
+      setResultadosProveedores(
+        []
+      );
+
+      setFactura(
+        prev => ({
+          ...prev,
+
+          proveedorNombre:
+            esBusquedaDocumento(
+              texto
+            )
+              ? ""
+              : texto,
+
+          proveedorDocumento:
+            esBusquedaDocumento(
+              texto
+            )
+              ? texto
+              : ""
+        })
+      );
+
+      setError(
+        ""
+      );
+    };
+
+  const cancelarProveedorNuevo =
+    () => {
+      setProveedorNuevo(
+        false
+      );
+
+      setFactura(
+        prev => ({
+          ...prev,
+          proveedorNombre: "",
+          proveedorDocumento: ""
+        })
+      );
+    };
+
+  const buscarProveedorDocumentoExacto =
+    async documento => {
+      if (
+        !proveedoresCol ||
+        !documento
+      ) {
+        return null;
+      }
+
+      const documentoNormalizado =
+        normalizarDocumento(
+          documento
+        );
+
+      const consultas = [
+        getDocs(
+          query(
+            proveedoresCol,
+            where(
+              "documentoNormalizado",
+              "==",
+              documentoNormalizado
+            ),
+            limit(1)
+          )
+        ),
+
+        getDocs(
+          query(
+            proveedoresCol,
+            where(
+              "documento",
+              "==",
+              documento
+            ),
+            limit(1)
+          )
+        )
+      ];
+
+      const respuestas =
+        await Promise.allSettled(
+          consultas
+        );
+
+      for (
+        const respuesta
+        of respuestas
+      ) {
+        if (
+          respuesta.status ===
+            "fulfilled" &&
+          !respuesta.value.empty
+        ) {
+          const d =
+            respuesta.value.docs[0];
+
+          return {
+            id:
+              d.id,
+            ...d.data()
+          };
+        }
+      }
+
+      return null;
+    };
 
   /* =======================================================
      PRODUCTOS
@@ -107,6 +707,7 @@ export default function Compras() {
     tipoPago: "CONTADO",
     fechaVencimiento: ""
   });
+
 
   /* =======================================================
      SELECCIÓN PRODUCTO
@@ -131,6 +732,288 @@ export default function Compras() {
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
   const [exito, setExito] = useState("");
+
+  /* =======================================================
+     BORRADOR DE COMPRA
+
+     sessionStorage permite:
+     - ir a Inventario / Proveedores / Cartera
+     - volver a Compras sin perder lo ingresado
+     - recuperar el borrador tras refrescar esta pestaña
+
+     Al cerrar la pestaña, el borrador desaparece.
+  ======================================================= */
+
+  const borradorKey =
+    empresa?.id &&
+    user?.uid
+      ? `ordexa_borrador_compra_${empresa.id}_${user.uid}`
+      : null;
+
+  /*
+   * Restaurar una sola vez por montaje.
+   */
+  useEffect(() => {
+    if (
+      !borradorKey ||
+      borradorRestauradoRef.current
+    ) {
+      return;
+    }
+
+    borradorRestauradoRef.current =
+      true;
+
+    try {
+      const guardado =
+        sessionStorage.getItem(
+          borradorKey
+        );
+
+      if (!guardado) {
+        return;
+      }
+
+      const borrador =
+        JSON.parse(
+          guardado
+        );
+
+      if (
+        borrador?.factura &&
+        typeof borrador.factura ===
+          "object"
+      ) {
+        setFactura(
+          prev => ({
+            ...prev,
+            ...borrador.factura
+          })
+        );
+      }
+
+      if (
+        borrador?.proveedorSeleccionado &&
+        typeof borrador.proveedorSeleccionado ===
+          "object"
+      ) {
+        setProveedorSeleccionado(
+          borrador.proveedorSeleccionado
+        );
+      }
+
+      setProveedorNuevo(
+        Boolean(
+          borrador?.proveedorNuevo
+        )
+      );
+
+      setQProveedor(
+        borrador?.qProveedor ||
+        ""
+      );
+
+      if (
+        Array.isArray(
+          borrador?.items
+        )
+      ) {
+        setItems(
+          borrador.items
+        );
+      }
+
+      setBusqueda(
+        borrador?.busqueda ||
+        ""
+      );
+
+      if (
+        borrador?.linea &&
+        typeof borrador.linea ===
+          "object"
+      ) {
+        setLinea(
+          prev => ({
+            ...prev,
+            ...borrador.linea
+          })
+        );
+      }
+
+      productoPendienteRestaurarRef.current =
+        borrador?.productoId ||
+        null;
+
+      const tieneContenido =
+        Boolean(
+          borrador?.factura?.numeroFactura ||
+          borrador?.factura?.proveedorNombre ||
+          borrador?.proveedorSeleccionado?.id ||
+          borrador?.proveedorNuevo ||
+          (
+            Array.isArray(
+              borrador?.items
+            ) &&
+            borrador.items.length > 0
+          ) ||
+          borrador?.productoId
+        );
+
+      setBorradorRecuperado(
+        tieneContenido
+      );
+
+    } catch (e) {
+      console.warn(
+        "No se pudo restaurar el borrador de compra.",
+        e
+      );
+
+      sessionStorage.removeItem(
+        borradorKey
+      );
+    }
+  }, [
+    borradorKey
+  ]);
+
+  /*
+   * Guardado automático.
+   * Esperamos a que primero se intente restaurar,
+   * para no sobrescribir un borrador con valores vacíos.
+   */
+  useEffect(() => {
+    if (
+      !borradorKey ||
+      !borradorRestauradoRef.current ||
+      guardando
+    ) {
+      return;
+    }
+
+    const tieneContenido =
+      Boolean(
+        factura.numeroFactura ||
+        factura.proveedorNombre ||
+        factura.proveedorDocumento ||
+        proveedorSeleccionado?.id ||
+        proveedorNuevo ||
+        items.length > 0 ||
+        productoId
+      );
+
+    if (
+      !tieneContenido
+    ) {
+      sessionStorage.removeItem(
+        borradorKey
+      );
+
+      return;
+    }
+
+    const borrador = {
+      version: 1,
+
+      factura,
+
+      proveedorSeleccionado:
+        proveedorSeleccionado
+          ? {
+              id:
+                proveedorSeleccionado.id,
+
+              nombre:
+                proveedorSeleccionado.nombre ||
+                "",
+
+              documento:
+                proveedorSeleccionado.documento ||
+                ""
+            }
+          : null,
+
+      proveedorNuevo,
+
+      qProveedor,
+
+      items,
+
+      productoId,
+
+      busqueda,
+
+      linea,
+
+      guardadoEn:
+        Date.now()
+    };
+
+    try {
+      sessionStorage.setItem(
+        borradorKey,
+        JSON.stringify(
+          borrador
+        )
+      );
+    } catch (e) {
+      console.warn(
+        "No se pudo guardar el borrador de compra.",
+        e
+      );
+    }
+  }, [
+    borradorKey,
+    factura,
+    proveedorSeleccionado,
+    proveedorNuevo,
+    qProveedor,
+    items,
+    productoId,
+    busqueda,
+    linea,
+    guardando
+  ]);
+
+  /*
+   * Si había un producto seleccionado antes de salir,
+   * lo recuperamos usando el producto FRESCO leído de
+   * Firestore. Así un ajuste hecho en Inventario se refleja
+   * al volver a Compras.
+   */
+  useEffect(() => {
+    const idPendiente =
+      productoPendienteRestaurarRef.current;
+
+    if (
+      !idPendiente ||
+      productos.length === 0
+    ) {
+      return;
+    }
+
+    const producto =
+      productos.find(
+        p =>
+          p.id ===
+          idPendiente
+      );
+
+    productoPendienteRestaurarRef.current =
+      null;
+
+    if (
+      producto &&
+      producto.activo !== false
+    ) {
+      setProductoId(
+        producto.id
+      );
+    }
+  }, [
+    productos
+  ]);
 
   /* =======================================================
      CARGAR PRODUCTOS
@@ -262,8 +1145,32 @@ export default function Compras() {
     const precioSugerido =
       costoPromedio * (1 + gananciaObjetivo);
 
+    const precioMinimoCalculado =
+      costoPromedio *
+      (
+        1 +
+        gananciaMinima
+      );
+
+    const precioMinimoManual =
+      Number(
+        productoActual?.precioMinimo ||
+        0
+      );
+
+    const usaPrecioMinimoManual =
+      productoActual?.precioMinimoManual ===
+        true &&
+      Number.isFinite(
+        precioMinimoManual
+      ) &&
+      precioMinimoManual >
+        0;
+
     const precioMinimo =
-      costoPromedio * (1 + gananciaMinima);
+      usaPrecioMinimoManual
+        ? precioMinimoManual
+        : precioMinimoCalculado;
 
     return {
       stockActual,
@@ -271,7 +1178,8 @@ export default function Compras() {
       nuevoStock,
       costoPromedio,
       precioSugerido,
-      precioMinimo
+      precioMinimo,
+      usaPrecioMinimoManual
     };
   }, [productoActual, linea]);
 
@@ -286,9 +1194,11 @@ export default function Compras() {
       setLinea(prev => ({
         ...prev,
         costoCompra:
-          productoActual.costoPromedio ??
-          productoActual.costoUnitario ??
-          ""
+          formatearNumeroInput(
+            productoActual.costoPromedio ??
+            productoActual.costoUnitario ??
+            ""
+          )
       }));
     }
   }, [productoActual]);
@@ -304,7 +1214,11 @@ export default function Compras() {
     setLinea(prev => ({
       ...prev,
       precioVenta:
-        Math.round(simulacion.precioSugerido)
+        formatearNumeroInput(
+          Math.round(
+            simulacion.precioSugerido
+          )
+        )
     }));
   }, [
     productoActual?.id,
@@ -335,9 +1249,11 @@ export default function Compras() {
     setLinea({
       cantidad: 1,
       costoCompra:
-        p?.costoPromedio ??
-        p?.costoUnitario ??
-        "",
+        formatearNumeroInput(
+          p?.costoPromedio ??
+          p?.costoUnitario ??
+          ""
+        ),
       gananciaObjetivo:
         p?.porcentajeGanancia ??
         30,
@@ -567,9 +1483,53 @@ export default function Compras() {
 
       setGuardando(true);
 
+      /*
+       * Si estamos creando un proveedor nuevo y tiene
+       * documento, comprobamos que no exista otro con
+       * ese mismo documento antes de registrar la compra.
+       */
+      if (
+        !proveedorSeleccionado &&
+        factura.proveedorDocumento.trim()
+      ) {
+        const existente =
+          await buscarProveedorDocumentoExacto(
+            factura.proveedorDocumento.trim()
+          );
+
+        if (
+          existente
+        ) {
+          seleccionarProveedor(
+            existente
+          );
+
+          setGuardando(
+            false
+          );
+
+          return setError(
+            `Ya existe el proveedor "${existente.nombre || "Proveedor"}" con ese documento. Ordexa lo seleccionó automáticamente; revisa los datos y vuelve a registrar la factura.`
+          );
+        }
+      }
+
+      const proveedorDocumentoNormalizado =
+        normalizarDocumento(
+          factura.proveedorDocumento
+        );
+
+      /*
+       * Si el proveedor ya existe conservamos su ID.
+       * Si es nuevo usamos documento normalizado o,
+       * si no tiene documento, un slug del nombre.
+       */
       const proveedorId =
-        factura.proveedorDocumento.trim() ||
-        slug(factura.proveedorNombre);
+        proveedorSeleccionado?.id ||
+        proveedorDocumentoNormalizado ||
+        slug(
+          factura.proveedorNombre
+        );
 
       const compraRef =
         doc(
@@ -694,13 +1654,33 @@ export default function Compras() {
                   100
               );
 
-            const precioMinimo =
+            const precioMinimoCalculado =
               costoPromedio *
               (
                 1 +
                 item.gananciaMinima /
                   100
               );
+
+            const precioMinimoManual =
+              Number(
+                producto.precioMinimo ||
+                0
+              );
+
+            const usaPrecioMinimoManual =
+              producto.precioMinimoManual ===
+                true &&
+              Number.isFinite(
+                precioMinimoManual
+              ) &&
+              precioMinimoManual >
+                0;
+
+            const precioMinimo =
+              usaPrecioMinimoManual
+                ? precioMinimoManual
+                : precioMinimoCalculado;
 
             if (
               item.precioVenta <
@@ -727,10 +1707,19 @@ export default function Compras() {
                   Math.round(
                     precioSugerido
                   ),
+                /*
+                 * Un mínimo manual se conserva.
+                 * Si el producto usa mínimo automático,
+                 * lo recalculamos normalmente.
+                 */
                 precioMinimo:
                   Math.round(
                     precioMinimo
                   ),
+
+                precioMinimoManual:
+                  usaPrecioMinimoManual,
+
                 precioUnitario:
                   Math.round(
                     item.precioVenta
@@ -847,13 +1836,30 @@ export default function Compras() {
             {
               nombre:
                 factura.proveedorNombre.trim(),
+
+              /*
+               * Conservamos nombreLower por compatibilidad
+               * y agregamos los campos preparados para las
+               * búsquedas escalables.
+               */
               nombreLower:
                 factura.proveedorNombre
                   .trim()
                   .toLowerCase(),
+
+              nombreBusqueda:
+                normalizarNombreBusqueda(
+                  factura.proveedorNombre
+                ),
+
               documento:
                 factura.proveedorDocumento.trim() ||
                 null,
+
+              documentoNormalizado:
+                proveedorDocumentoNormalizado ||
+                null,
+
               updatedAt:
                 serverTimestamp()
             },
@@ -949,6 +1955,56 @@ export default function Compras() {
         }
       );
 
+      const proveedorGuardado = {
+        id:
+          proveedorId,
+
+        nombre:
+          factura.proveedorNombre.trim(),
+
+        documento:
+          factura.proveedorDocumento.trim()
+      };
+
+      guardarProveedorReciente(
+        proveedorGuardado
+      );
+
+      /*
+       * Compra registrada correctamente:
+       * ya no necesitamos conservar el borrador.
+       */
+      if (
+        borradorKey
+      ) {
+        sessionStorage.removeItem(
+          borradorKey
+        );
+      }
+
+      borradorRestauradoRef.current =
+        false;
+
+      setBorradorRecuperado(
+        false
+      );
+
+      setProveedorSeleccionado(
+        null
+      );
+
+      setProveedorNuevo(
+        false
+      );
+
+      setQProveedor(
+        ""
+      );
+
+      setResultadosProveedores(
+        []
+      );
+
       setFactura({
         numeroFactura: "",
         fecha: hoyISO(),
@@ -1040,6 +2096,48 @@ export default function Compras() {
           <AppMenu />
         </div>
       </header>
+
+      {borradorRecuperado && (
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent:
+              "space-between",
+            alignItems: "center",
+            gap: 10,
+            flexWrap: "wrap",
+            marginBottom: 12,
+            padding:
+              "9px 12px",
+            border:
+              "1px solid rgba(59,130,246,.22)",
+            borderRadius: 11,
+            background:
+              esClaro
+                ? "#f3f7ff"
+                : "rgba(59,130,246,.055)",
+            fontSize: 11
+          }}
+        >
+          <span>
+            💾 Recuperamos la compra que estabas preparando.
+          </span>
+
+          <button
+            type="button"
+            className="btn btn-small"
+            onClick={() =>
+              setBorradorRecuperado(
+                false
+              )
+            }
+          >
+            Entendido
+          </button>
+        </div>
+
+      )}
 
       {/* GUÍA VISUAL DEL PROCESO */}
 
@@ -1339,66 +2437,453 @@ export default function Compras() {
             >
               <div
                 style={{
-                  fontSize: 11,
-                  fontWeight: 800,
-                  color: "var(--muted)",
-                  textTransform:
-                    "uppercase",
-                  letterSpacing: ".05em",
+                  display: "flex",
+                  justifyContent:
+                    "space-between",
+                  gap: 10,
+                  alignItems: "center",
+                  flexWrap: "wrap",
                   marginBottom: 10
                 }}
               >
-                Proveedor
+                <div
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 800,
+                    color: "var(--muted)",
+                    textTransform:
+                      "uppercase",
+                    letterSpacing: ".05em"
+                  }}
+                >
+                  Proveedor
+                </div>
+
+                {!proveedorSeleccionado &&
+                  !proveedorNuevo && (
+
+                  <span
+                    className="inv-subtle"
+                    style={{
+                      fontSize: 10
+                    }}
+                  >
+                    🔎 Búsqueda remota · máximo {PROVEEDORES_BUSQUEDA_LIMITE} resultados
+                  </span>
+
+                )}
               </div>
 
-              <div className="form-grid">
-                <div className="form-field">
-                  <label>
-                    Nombre del proveedor
-                    <span
+              {proveedorSeleccionado ? (
+
+                <div
+                  style={{
+                    padding: 14,
+                    borderRadius: 14,
+                    border:
+                      "1px solid rgba(34,197,94,.30)",
+                    background:
+                      esClaro
+                        ? "#f3fff7"
+                        : "rgba(34,197,94,.055)"
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent:
+                        "space-between",
+                      gap: 12,
+                      alignItems: "center",
+                      flexWrap: "wrap"
+                    }}
+                  >
+                    <div>
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 7,
+                          alignItems: "center",
+                          flexWrap: "wrap"
+                        }}
+                      >
+                        <strong
+                          style={{
+                            fontSize: 16
+                          }}
+                        >
+                          {factura.proveedorNombre}
+                        </strong>
+
+                        <span
+                          className="badge"
+                          style={{
+                            color: "#22c55e"
+                          }}
+                        >
+                          ✓ Seleccionado
+                        </span>
+                      </div>
+
+                      <div
+                        className="inv-subtle"
+                        style={{
+                          marginTop: 5,
+                          fontSize: 12
+                        }}
+                      >
+                        NIT / Documento:{" "}
+                        <b>
+                          {factura.proveedorDocumento ||
+                            "No registrado"}
+                        </b>
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={
+                        limpiarProveedor
+                      }
+                    >
+                      Cambiar proveedor
+                    </button>
+                  </div>
+                </div>
+
+              ) : proveedorNuevo ? (
+
+                <div
+                  style={{
+                    padding: 14,
+                    borderRadius: 14,
+                    border:
+                      "1px solid rgba(59,130,246,.25)",
+                    background:
+                      esClaro
+                        ? "#f7faff"
+                        : "rgba(59,130,246,.045)"
+                  }}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent:
+                        "space-between",
+                      alignItems: "center",
+                      gap: 10,
+                      marginBottom: 11
+                    }}
+                  >
+                    <strong>
+                      ➕ Proveedor nuevo
+                    </strong>
+
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={
+                        cancelarProveedorNuevo
+                      }
+                    >
+                      Cancelar
+                    </button>
+                  </div>
+
+                  <div className="form-grid">
+                    <div className="form-field">
+                      <label>
+                        Nombre del proveedor *
+                      </label>
+
+                      <input
+                        autoFocus
+                        value={
+                          factura.proveedorNombre
+                        }
+                        placeholder="Ej: Distribuciones ABC"
+                        onChange={e =>
+                          setFactura({
+                            ...factura,
+                            proveedorNombre:
+                              e.target.value
+                          })
+                        }
+                      />
+                    </div>
+
+                    <div className="form-field">
+                      <label>
+                        NIT / Documento
+                      </label>
+
+                      <input
+                        value={
+                          factura.proveedorDocumento
+                        }
+                        placeholder="Opcional"
+                        onChange={e =>
+                          setFactura({
+                            ...factura,
+                            proveedorDocumento:
+                              e.target.value
+                          })
+                        }
+                      />
+                    </div>
+                  </div>
+
+                  <p
+                    className="inv-subtle"
+                    style={{
+                      margin:
+                        "9px 0 0",
+                      fontSize: 11
+                    }}
+                  >
+                    Ordexa guardará este proveedor al registrar la factura y quedará disponible para futuras compras.
+                  </p>
+                </div>
+
+              ) : (
+
+                <>
+                  <div
+                    className="input-with-icon"
+                    style={{
+                      maxWidth: "100%"
+                    }}
+                  >
+                    <span className="icon">
+                      🔎
+                    </span>
+
+                    <input
+                      type="text"
+                      placeholder="Buscar por nombre o NIT / documento…"
+                      value={
+                        qProveedor
+                      }
+                      onChange={e =>
+                        setQProveedor(
+                          e.target.value
+                        )
+                      }
+                    />
+                  </div>
+
+                  {qProveedor.trim().length === 1 && (
+
+                    <p
+                      className="inv-subtle"
                       style={{
-                        color: "#ef4444"
+                        margin:
+                          "7px 0 0",
+                        fontSize: 11
                       }}
                     >
-                      {" "}*
-                    </span>
-                  </label>
+                      Escribe al menos 2 caracteres para buscar.
+                    </p>
 
-                  <input
-                    value={
-                      factura.proveedorNombre
-                    }
-                    placeholder="Ej: Distribuciones ABC"
-                    onChange={e =>
-                      setFactura({
-                        ...factura,
-                        proveedorNombre:
-                          e.target.value
-                      })
-                    }
-                  />
-                </div>
+                  )}
 
-                <div className="form-field">
-                  <label>
-                    NIT / Documento
-                  </label>
+                  {!qProveedor &&
+                    recientesProveedores.length > 0 && (
 
-                  <input
-                    value={
-                      factura.proveedorDocumento
-                    }
-                    placeholder="Opcional"
-                    onChange={e =>
-                      setFactura({
-                        ...factura,
-                        proveedorDocumento:
-                          e.target.value
-                      })
-                    }
-                  />
-                </div>
-              </div>
+                    <div
+                      style={{
+                        marginTop: 11
+                      }}
+                    >
+                      <div
+                        className="inv-subtle"
+                        style={{
+                          marginBottom: 7,
+                          fontSize: 11
+                        }}
+                      >
+                        Proveedores recientes
+                      </div>
+
+                      <div
+                        style={{
+                          display: "flex",
+                          gap: 7,
+                          flexWrap: "wrap"
+                        }}
+                      >
+                        {recientesProveedores.map(
+                          proveedor => (
+
+                            <button
+                              key={
+                                proveedor.id
+                              }
+                              type="button"
+                              className="btn btn-small"
+                              onClick={() =>
+                                seleccionarProveedor(
+                                  proveedor
+                                )
+                              }
+                            >
+                              🏢 {proveedor.nombre}
+                            </button>
+
+                          )
+                        )}
+                      </div>
+                    </div>
+
+                  )}
+
+                  {qProveedor.trim().length >= 2 && (
+
+                    <div
+                      style={{
+                        marginTop: 10,
+                        border:
+                          "1px solid var(--border)",
+                        borderRadius: 13,
+                        overflow: "hidden"
+                      }}
+                    >
+                      {buscandoProveedor ? (
+
+                        <div
+                          className="inv-subtle"
+                          style={{
+                            padding: 13
+                          }}
+                        >
+                          Buscando proveedores…
+                        </div>
+
+                      ) : resultadosProveedores.length > 0 ? (
+
+                        resultadosProveedores.map(
+                          proveedor => (
+
+                            <button
+                              key={
+                                proveedor.id
+                              }
+                              type="button"
+                              onClick={() =>
+                                seleccionarProveedor(
+                                  proveedor
+                                )
+                              }
+                              style={{
+                                width: "100%",
+                                display: "flex",
+                                justifyContent:
+                                  "space-between",
+                                alignItems: "center",
+                                gap: 12,
+                                padding: "11px 12px",
+                                border: 0,
+                                borderBottom:
+                                  "1px solid var(--border)",
+                                background:
+                                  "transparent",
+                                color:
+                                  "var(--text)",
+                                cursor: "pointer",
+                                textAlign: "left"
+                              }}
+                            >
+                              <div>
+                                <strong>
+                                  {proveedor.nombre ||
+                                    "Proveedor"}
+                                </strong>
+
+                                <div
+                                  className="inv-subtle"
+                                  style={{
+                                    marginTop: 3,
+                                    fontSize: 11
+                                  }}
+                                >
+                                  NIT / Documento:{" "}
+                                  {proveedor.documento ||
+                                    "—"}
+                                </div>
+                              </div>
+
+                              <span
+                                style={{
+                                  color: "#22c55e",
+                                  fontWeight: 800,
+                                  fontSize: 12
+                                }}
+                              >
+                                Seleccionar
+                              </span>
+                            </button>
+
+                          )
+                        )
+
+                      ) : (
+
+                        <div
+                          style={{
+                            padding: 13
+                          }}
+                        >
+                          <strong>
+                            No encontramos proveedores.
+                          </strong>
+
+                          <p
+                            className="inv-subtle"
+                            style={{
+                              margin:
+                                "4px 0 10px",
+                              fontSize: 11
+                            }}
+                          >
+                            Si es un proveedor nuevo, puedes registrarlo sin salir de la factura.
+                          </p>
+
+                          <button
+                            type="button"
+                            className="btn btn-primary btn-small"
+                            onClick={
+                              iniciarProveedorNuevo
+                            }
+                          >
+                            ➕ Registrar proveedor nuevo
+                          </button>
+                        </div>
+
+                      )}
+                    </div>
+
+                  )}
+
+                  {!qProveedor && (
+
+                    <button
+                      type="button"
+                      className="btn btn-small"
+                      onClick={
+                        iniciarProveedorNuevo
+                      }
+                      style={{
+                        marginTop: 11
+                      }}
+                    >
+                      ➕ Proveedor nuevo
+                    </button>
+
+                  )}
+                </>
+
+              )}
             </div>
 
             {/* PAGO */}
@@ -1814,8 +3299,8 @@ export default function Compras() {
                     </label>
 
                     <input
-                      type="number"
-                      min="0"
+                      type="text"
+                      inputMode="numeric"
                       value={
                         linea.costoCompra
                       }
@@ -1823,9 +3308,12 @@ export default function Compras() {
                         setLinea({
                           ...linea,
                           costoCompra:
-                            e.target.value
+                            formatearNumeroInput(
+                              e.target.value
+                            )
                         })
                       }
+                      placeholder="0"
                     />
 
                     <span
@@ -1864,6 +3352,31 @@ export default function Compras() {
                   >
                     Precio de venta después de la compra
                   </div>
+
+                  {simulacion.usaPrecioMinimoManual && (
+
+                    <div
+                      style={{
+                        marginBottom: 11,
+                        padding: "9px 11px",
+                        borderRadius: 10,
+                        border:
+                          "1px solid rgba(245,158,11,.25)",
+                        background:
+                          "rgba(245,158,11,.06)",
+                        fontSize: 11
+                      }}
+                    >
+                      🔒 Este producto usa un precio mínimo manual de{" "}
+                      <b>
+                        {moneda(
+                          simulacion.precioMinimo
+                        )}
+                      </b>
+                      . La compra actualizará el costo promedio, pero no reemplazará ese mínimo.
+                    </div>
+
+                  )}
 
                   <div className="form-grid">
                     <div className="form-field">
@@ -1920,8 +3433,8 @@ export default function Compras() {
                       </label>
 
                       <input
-                        type="number"
-                        min="0"
+                        type="text"
+                        inputMode="numeric"
                         value={
                           linea.precioVenta
                         }
@@ -1929,9 +3442,12 @@ export default function Compras() {
                           setLinea({
                             ...linea,
                             precioVenta:
-                              e.target.value
+                              formatearNumeroInput(
+                                e.target.value
+                              )
                           })
                         }
+                        placeholder="0"
                         style={{
                           fontWeight: 800,
                           fontSize: 15

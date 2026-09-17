@@ -15,6 +15,7 @@ import Factura from "./pages/Factura.jsx";
 import Configuracion from "./pages/Configuracion.jsx";
 import Clientes from "./pages/Clientes.jsx";
 import ClienteDetalle from "./pages/ClienteDetalle.jsx";
+import Proveedores from "./pages/Proveedores.jsx";
 import Login from "./pages/Login.jsx";
 import SignUp from "./pages/SignUp.jsx";
 import VerifyEmail from "./pages/VerifyEmail.jsx";
@@ -32,6 +33,9 @@ import FacturaCompra from "./pages/FacturaCompra.jsx";
 import TenantProvider, {
   useTenant
 } from "./tenant/TenantProvider";
+
+// Layout privado
+import AppLayout from "./components/AppLayout.jsx";
 
 // Offline banner
 import OfflineBanner from "./components/OfflineBanner.jsx";
@@ -89,7 +93,11 @@ function Protected({
     );
   }
 
-  return children;
+  return (
+    <AppLayout>
+      {children}
+    </AppLayout>
+  );
 }
 
 /* =========================================================
@@ -227,6 +235,7 @@ export default function App() {
               </Protected>
             }
           />
+
           <Route
             path="/movimientos-inventario"
             element={
@@ -235,6 +244,7 @@ export default function App() {
               </Protected>
             }
           />
+
           {/* VENTAS */}
 
           <Route
@@ -275,32 +285,32 @@ export default function App() {
 
           {/* COMPRAS */}
 
-         <Route
-  path="/compras"
-  element={
-    <Protected>
-      <Compras />
-    </Protected>
-  }
-/>
+          <Route
+            path="/compras"
+            element={
+              <Protected>
+                <Compras />
+              </Protected>
+            }
+          />
 
-<Route
-  path="/historial-compras"
-  element={
-    <Protected>
-      <HistorialCompras />
-    </Protected>
-  }
-/>
+          <Route
+            path="/historial-compras"
+            element={
+              <Protected>
+                <HistorialCompras />
+              </Protected>
+            }
+          />
 
-<Route
-  path="/factura-compra/:id"
-  element={
-    <Protected>
-      <FacturaCompra />
-    </Protected>
-  }
-/>
+          <Route
+            path="/factura-compra/:id"
+            element={
+              <Protected>
+                <FacturaCompra />
+              </Protected>
+            }
+          />
 
           {/* CARTERA */}
 
@@ -329,6 +339,17 @@ export default function App() {
             element={
               <Protected>
                 <ClienteDetalle />
+              </Protected>
+            }
+          />
+
+          {/* PROVEEDORES */}
+
+          <Route
+            path="/proveedores"
+            element={
+              <Protected>
+                <Proveedores />
               </Protected>
             }
           />

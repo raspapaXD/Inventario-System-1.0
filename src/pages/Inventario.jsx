@@ -67,6 +67,7 @@ function useTheme() {
 const numericFields = new Set([
   "minimo",
   "precio",
+  "precioMinimo",
   "costo"
 ]);
 
@@ -536,6 +537,8 @@ function Inventario() {
     minimo: "",
     imagen: null,
     precio: "",
+    precioMinimo: "",
+    precioMinimoManual: false,
     costo: "",
     categoriaId: ""
   });
@@ -1256,18 +1259,47 @@ function Inventario() {
         event.target;
 
       setProductoForm(
-        prev => ({
-          ...prev,
-
-          [name]:
+        prev => {
+          const valorFinal =
             numericFields.has(
               name
             )
               ? formatearNumero(
                   value
                 )
-              : value
-        })
+              : value;
+
+          /*
+           * Si el usuario modifica el precio mínimo,
+           * Ordexa lo tratará como un valor manual.
+           * Compras respetará este valor y no lo
+           * sobrescribirá al recalcular costos.
+           */
+          if (
+            name ===
+            "precioMinimo"
+          ) {
+            return {
+              ...prev,
+
+              precioMinimo:
+                valorFinal,
+
+              precioMinimoManual:
+                Boolean(
+                  limpiarNumero(
+                    value
+                  )
+                )
+            };
+          }
+
+          return {
+            ...prev,
+            [name]:
+              valorFinal
+          };
+        }
       );
     };
 
@@ -1285,6 +1317,8 @@ function Inventario() {
         minimo: "",
         imagen: null,
         precio: "",
+        precioMinimo: "",
+        precioMinimoManual: false,
         costo: "",
         categoriaId: ""
       });
@@ -1355,6 +1389,23 @@ function Inventario() {
             producto.precioUnitario ??
             0
           ),
+
+        precioMinimo:
+          formatearNumero(
+            obtenerPrecioMinimo(
+              producto
+            )
+          ),
+
+        /*
+         * Los productos anteriores pueden tener
+         * precioMinimo calculado automáticamente.
+         * Solo consideramos manual el que haya sido
+         * marcado expresamente como tal.
+         */
+        precioMinimoManual:
+          producto.precioMinimoManual ===
+          true,
 
         costo:
           formatearNumero(
@@ -1491,6 +1542,17 @@ function Inventario() {
           productoForm.precio
         );
 
+      const precioMinimoIngresado =
+        numeroDesdeInput(
+          productoForm.precioMinimo
+        );
+
+      const precioMinimoManual =
+        productoForm.precioMinimoManual ===
+          true &&
+        precioMinimoIngresado >
+          0;
+
       const costo =
         numeroDesdeInput(
           productoForm.costo
@@ -1511,6 +1573,15 @@ function Inventario() {
       if (precio < 0) {
         return setError(
           "El precio no puede ser negativo."
+        );
+      }
+
+      if (
+        precioMinimoIngresado <
+        0
+      ) {
+        return setError(
+          "El precio mínimo no puede ser negativo."
         );
       }
 
@@ -1556,25 +1627,33 @@ function Inventario() {
         }
       }
 
-      if (
-        productoActual
-      ) {
-        const precioMinimo =
-          obtenerPrecioMinimo(
-            productoActual
-          );
+      /*
+       * Si el usuario acaba de escribir un mínimo manual,
+       * validamos contra ese nuevo valor.
+       *
+       * Si no lo tocó, conservamos la validación contra
+       * el mínimo que ya tiene el producto.
+       */
+      const precioMinimoValidacion =
+        precioMinimoManual
+          ? precioMinimoIngresado
+          : productoActual
+            ? obtenerPrecioMinimo(
+                productoActual
+              )
+            : 0;
 
-        if (
-          precioMinimo > 0 &&
-          precio <
-          precioMinimo
-        ) {
-          return setError(
-            `El precio de venta no puede quedar por debajo del precio mínimo de ${formatearMoneda(
-              precioMinimo
-            )}.`
-          );
-        }
+      if (
+        precioMinimoValidacion >
+          0 &&
+        precio <
+          precioMinimoValidacion
+      ) {
+        return setError(
+          `El precio de venta no puede quedar por debajo del precio mínimo de ${formatearMoneda(
+            precioMinimoValidacion
+          )}.`
+        );
       }
 
       try {
@@ -1650,6 +1729,38 @@ function Inventario() {
 
           precioUnitario:
             precio,
+
+          /*
+           * Solo escribimos el precio mínimo cuando
+           * el usuario lo definió manualmente.
+           *
+           * Esto evita convertir sin querer todos los
+           * mínimos automáticos existentes en manuales.
+           */
+          ...(
+            precioMinimoManual
+              ? {
+                  precioMinimo:
+                    Math.round(
+                      precioMinimoIngresado
+                    ),
+
+                  precioMinimoManual:
+                    true,
+
+                  precioMinimoActualizadoEn:
+                    serverTimestamp(),
+
+                  precioMinimoActualizadoPorId:
+                    user?.uid ||
+                    null,
+
+                  precioMinimoActualizadoPorEmail:
+                    user?.email ||
+                    null
+                }
+              : {}
+          ),
 
           categoriaId:
             productoForm.categoriaId ||
@@ -3240,6 +3351,40 @@ function Inventario() {
                     handleChange
                   }
                 />
+
+              </div>
+
+              <div className="form-field">
+
+                <label>
+                  Precio mínimo
+                </label>
+
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  name="precioMinimo"
+                  placeholder="0"
+                  value={
+                    productoForm.precioMinimo
+                  }
+                  onChange={
+                    handleChange
+                  }
+                />
+
+                <span
+                  className="inv-subtle"
+                  style={{
+                    display: "block",
+                    marginTop: 5,
+                    fontSize: 11
+                  }}
+                >
+                  {productoForm.precioMinimoManual
+                    ? "✏️ Mínimo manual. Ordexa lo conservará aunque cambie el costo en futuras compras."
+                    : "Si cambias este valor, quedará como precio mínimo manual del producto."}
+                </span>
 
               </div>
 

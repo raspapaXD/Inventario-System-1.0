@@ -24,6 +24,8 @@ import {
 import { db } from "../../firebaseClient.js";
 import { useTenant } from "../tenant/TenantProvider";
 import AppMenu from "../components/AppMenu.jsx";
+import EditarFacturaCompraModal from "../components/EditarFacturaCompraModal.jsx";
+import AnularFacturaCompraModal from "../components/AnularFacturaCompraModal.jsx";
 
 import "./inventario.css";
 
@@ -147,7 +149,8 @@ export default function FacturaCompra() {
     useNavigate();
 
   const {
-    empresa
+    empresa,
+    user
   } = useTenant();
 
   const {
@@ -171,6 +174,11 @@ export default function FacturaCompra() {
   ] = useState(null);
 
   const [
+    rolActual,
+    setRolActual
+  ] = useState(null);
+
+  const [
     cargando,
     setCargando
   ] = useState(true);
@@ -179,6 +187,52 @@ export default function FacturaCompra() {
     error,
     setError
   ] = useState("");
+
+  const [
+    exito,
+    setExito
+  ] = useState("");
+
+  const [
+    modalEditar,
+    setModalEditar
+  ] = useState(false);
+
+  const [
+    modalAnular,
+    setModalAnular
+  ] = useState(false);
+
+  const [
+    refreshKey,
+    setRefreshKey
+  ] = useState(0);
+
+  const puedeEditar =
+    useMemo(() => {
+      if (!user?.uid || compra?.anulada === true) {
+        return false;
+      }
+
+      if (
+        empresaInfo?.ownerId ===
+        user.uid
+      ) {
+        return true;
+      }
+
+      return [
+        "owner",
+        "admin"
+      ].includes(
+        rolActual
+      );
+    }, [
+      empresaInfo,
+      rolActual,
+      user?.uid,
+      compra?.anulada
+    ]);
 
   /* =======================================================
      VOLVER
@@ -204,12 +258,15 @@ export default function FacturaCompra() {
   };
 
   /* =======================================================
-     EMPRESA
+     EMPRESA + ROL
   ======================================================= */
 
   useEffect(() => {
     (async () => {
-      if (!empresa?.id) {
+      if (
+        !empresa?.id ||
+        !user?.uid
+      ) {
         return;
       }
 
@@ -223,10 +280,42 @@ export default function FacturaCompra() {
             )
           );
 
-        setEmpresaInfo(
+        const info =
           snap.exists()
             ? snap.data()
-            : {}
+            : {};
+
+        setEmpresaInfo(
+          info
+        );
+
+        if (
+          info?.ownerId ===
+          user.uid
+        ) {
+          setRolActual(
+            "owner"
+          );
+
+          return;
+        }
+
+        const miembroSnap =
+          await getDoc(
+            doc(
+              db,
+              "empresas",
+              empresa.id,
+              "miembros",
+              user.uid
+            )
+          );
+
+        setRolActual(
+          miembroSnap.exists()
+            ? miembroSnap.data()?.rol ||
+              "member"
+            : "member"
         );
 
       } catch (e) {
@@ -235,7 +324,8 @@ export default function FacturaCompra() {
     })();
 
   }, [
-    empresa?.id
+    empresa?.id,
+    user?.uid
   ]);
 
   /* =======================================================
@@ -367,7 +457,8 @@ export default function FacturaCompra() {
 
   }, [
     empresa?.id,
-    id
+    id,
+    refreshKey
   ]);
 
   /* =======================================================
@@ -688,6 +779,36 @@ export default function FacturaCompra() {
               : "🌙 Oscuro"}
           </button>
 
+          {puedeEditar && (
+
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => {
+                setExito("");
+                setModalEditar(true);
+              }}
+            >
+              ✏️ Editar factura
+            </button>
+
+          )}
+
+          {puedeEditar && (
+
+            <button
+              type="button"
+              className="btn btn-danger"
+              onClick={() => {
+                setExito("");
+                setModalAnular(true);
+              }}
+            >
+              🚫 Anular factura
+            </button>
+
+          )}
+
           <button
             type="button"
             className="btn"
@@ -703,6 +824,24 @@ export default function FacturaCompra() {
         </div>
 
       </header>
+
+      {exito && (
+
+        <div
+          style={{
+            padding: 13,
+            marginBottom: 16,
+            borderRadius: 13,
+            border:
+              "1px solid rgba(34,197,94,.35)",
+            background:
+              "rgba(34,197,94,.07)"
+          }}
+        >
+          ✅ {exito}
+        </div>
+
+      )}
 
       {/* =====================================================
           FACTURA
@@ -724,15 +863,42 @@ export default function FacturaCompra() {
 
             <div>
 
-              <h2
+              <div
                 style={{
-                  margin: 0
+                  display: "flex",
+                  gap: 8,
+                  alignItems: "center",
+                  flexWrap: "wrap"
                 }}
               >
-                Factura{" "}
-                {compra.numeroFactura ||
-                  "—"}
-              </h2>
+
+                <h2
+                  style={{
+                    margin: 0
+                  }}
+                >
+                  Factura{" "}
+                  {compra.numeroFactura ||
+                    "—"}
+                </h2>
+
+                {Number(
+                  compra.version ||
+                  1
+                ) > 1 && (
+
+                  <span
+                    className="badge"
+                    style={{
+                      color: "#3b82f6"
+                    }}
+                  >
+                    ✏️ Modificada · v{compra.version}
+                  </span>
+
+                )}
+
+              </div>
 
               <p
                 className="inv-subtle"
@@ -745,6 +911,12 @@ export default function FacturaCompra() {
                 {formatearFechaHora(
                   compra.createdAt
                 )}
+
+                {compra.modificadoEn
+                  ? ` • Última edición ${formatearFechaHora(
+                      compra.modificadoEn
+                    )}`
+                  : ""}
               </p>
 
             </div>
@@ -753,14 +925,18 @@ export default function FacturaCompra() {
               className="badge"
               style={{
                 color:
-                  esCredito
-                    ? "#f59e0b"
-                    : "#22c55e"
+                  compra.anulada
+                    ? "#ef4444"
+                    : esCredito
+                      ? "#f59e0b"
+                      : "#22c55e"
               }}
             >
-              {esCredito
-                ? "📅 Crédito"
-                : "💵 Contado"}
+              {compra.anulada
+                ? "🚫 ANULADA"
+                : esCredito
+                  ? "📅 Crédito"
+                  : "💵 Contado"}
             </span>
 
           </div>
@@ -955,6 +1131,69 @@ export default function FacturaCompra() {
               )}
 
             </div>
+
+            {compra.modificadoEn && (
+
+              <div
+                style={{
+                  padding: 13,
+                  marginBottom: 18,
+                  borderRadius: 13,
+                  border:
+                    "1px solid rgba(59,130,246,.25)",
+                  background:
+                    "rgba(59,130,246,.055)"
+                }}
+              >
+                <strong
+                  style={{
+                    color: "#3b82f6"
+                  }}
+                >
+                  ✏️ Factura modificada
+                </strong>
+
+                <p
+                  className="inv-subtle"
+                  style={{
+                    margin: "5px 0 0"
+                  }}
+                >
+                  {compra.motivoUltimaEdicion ||
+                    "Sin motivo registrado."}
+
+                  {compra.modificadoPorEmail
+                    ? ` • ${compra.modificadoPorEmail}`
+                    : ""}
+                </p>
+              </div>
+
+            )}
+
+            {compra.anulada && (
+
+              <div
+                style={{
+                  padding: 14,
+                  marginBottom: 18,
+                  borderRadius: 14,
+                  border: "1px solid rgba(239,68,68,.30)",
+                  background: "rgba(239,68,68,.06)"
+                }}
+              >
+                <strong style={{ color: "#ef4444" }}>
+                  🚫 Factura anulada
+                </strong>
+
+                <p className="inv-subtle" style={{ margin: "5px 0 0" }}>
+                  {compra.motivoAnulacion || "Sin motivo registrado."}
+                  {compra.anuladaPorEmail
+                    ? ` • ${compra.anuladaPorEmail}`
+                    : ""}
+                </p>
+              </div>
+
+            )}
 
             {/* =================================================
                 PRODUCTOS
@@ -1220,6 +1459,50 @@ export default function FacturaCompra() {
         </div>
 
       </section>
+
+      {modalEditar && (
+
+        <EditarFacturaCompraModal
+          compra={compra}
+          cuenta={cuenta}
+          onClose={() =>
+            setModalEditar(false)
+          }
+          onSaved={() => {
+            setModalEditar(false);
+            setExito(
+              "Factura modificada correctamente. Se aplicaron las correcciones al inventario, Kardex y cartera."
+            );
+            setRefreshKey(
+              actual =>
+                actual + 1
+            );
+          }}
+        />
+
+      )}
+
+      {modalAnular && (
+
+        <AnularFacturaCompraModal
+          compra={compra}
+          cuenta={cuenta}
+          onClose={() =>
+            setModalAnular(false)
+          }
+          onSaved={() => {
+            setModalAnular(false);
+            setExito(
+              "Factura anulada correctamente. Ordexa revirtió el inventario y registró la trazabilidad."
+            );
+            setRefreshKey(
+              actual =>
+                actual + 1
+            );
+          }}
+        />
+
+      )}
 
     </div>
   );

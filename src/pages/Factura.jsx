@@ -28,6 +28,8 @@ import "./inventario.css";
 
 import { useTenant } from "../tenant/TenantProvider";
 import AppMenu from "../components/AppMenu.jsx";
+import EditarFacturaVentaModal from "../components/EditarFacturaVentaModal.jsx";
+import AnularFacturaVentaModal from "../components/AnularFacturaVentaModal.jsx";
 
 /* =========================================================
    TEMA
@@ -69,6 +71,44 @@ function useTheme() {
 
 const formatMoney = value =>
   `$${Number(value || 0).toLocaleString("es-CO")}`;
+
+const formatearNumeroFactura =
+  (
+    numeroFactura,
+    idLegacy = ""
+  ) => {
+    const numero =
+      Number(
+        numeroFactura
+      );
+
+    if (
+      Number.isInteger(
+        numero
+      ) &&
+      numero > 0
+    ) {
+      return String(
+        numero
+      ).padStart(
+        6,
+        "0"
+      );
+    }
+
+    /*
+     * Compatibilidad con facturas creadas antes
+     * de la numeración correlativa.
+     */
+    return String(
+      idLegacy || ""
+    )
+      .slice(
+        0,
+        8
+      )
+      .toUpperCase();
+  };
 
 function formatearFechaSimple(fecha) {
   if (!fecha) {
@@ -184,7 +224,8 @@ export default function Factura() {
   } = useTheme();
 
   const {
-    empresa
+    empresa,
+    user
   } = useTenant();
 
   const [
@@ -225,6 +266,31 @@ export default function Factura() {
     generandoPDF,
     setGenerandoPDF
   ] = useState(false);
+
+  const [
+    rolActual,
+    setRolActual
+  ] = useState(null);
+
+  const [
+    modalEditar,
+    setModalEditar
+  ] = useState(false);
+
+  const [
+    modalAnular,
+    setModalAnular
+  ] = useState(false);
+
+  const [
+    mensajeExito,
+    setMensajeExito
+  ] = useState("");
+
+  const [
+    refreshKey,
+    setRefreshKey
+  ] = useState(0);
 
   /* =======================================================
      VOLVER A LA PÁGINA ANTERIOR
@@ -269,11 +335,44 @@ export default function Factura() {
             )
           );
 
-        setEmpresaInfo(
+        const info =
           snap.exists()
             ? snap.data()
-            : {}
+            : {};
+
+        setEmpresaInfo(
+          info
         );
+
+        if (
+          user?.uid &&
+          info?.ownerId ===
+            user.uid
+        ) {
+          setRolActual(
+            "owner"
+          );
+        } else if (
+          user?.uid
+        ) {
+          const miembroSnap =
+            await getDoc(
+              doc(
+                db,
+                "empresas",
+                empresa.id,
+                "miembros",
+                user.uid
+              )
+            );
+
+          setRolActual(
+            miembroSnap.exists()
+              ? miembroSnap.data()?.rol ||
+                "member"
+              : "member"
+          );
+        }
 
       } catch (e) {
         console.error(e);
@@ -281,7 +380,8 @@ export default function Factura() {
     })();
 
   }, [
-    empresa?.id
+    empresa?.id,
+    user?.uid
   ]);
 
   /* =======================================================
@@ -346,9 +446,12 @@ export default function Factura() {
           snap &&
           snap.exists()
         ) {
-          setVenta(
-            snap.data()
-          );
+          setVenta({
+            ...snap.data(),
+            __legacy:
+              snap.ref?.path?.startsWith("ventas/") ||
+              false
+          });
 
         } else {
           setErr(
@@ -372,7 +475,8 @@ export default function Factura() {
 
   }, [
     id,
-    empresa?.id
+    empresa?.id,
+    refreshKey
   ]);
 
   /* =======================================================
@@ -458,7 +562,8 @@ export default function Factura() {
 
   }, [
     empresa?.id,
-    id
+    id,
+    refreshKey
   ]);
 
   /* =======================================================
@@ -684,12 +789,24 @@ export default function Factura() {
       : "—";
 
   const folio =
-    id
-      .slice(
-        0,
-        8
+    formatearNumeroFactura(
+      venta?.numeroFactura,
+      id
+    );
+
+  const esLegacy =
+    venta?.__legacy === true;
+
+  const puedeEditar =
+    Boolean(
+      !esLegacy &&
+      venta?.anulada !== true &&
+      user?.uid &&
+      (
+        empresaInfo?.ownerId === user.uid ||
+        ["owner", "admin"].includes(rolActual)
       )
-      .toUpperCase();
+    );
 
   /* =======================================================
      PDF PROFESIONAL
@@ -1984,6 +2101,32 @@ pdf.text(
               : "🌙 Oscuro"}
           </button>
 
+          {puedeEditar && (
+            <>
+              <button
+                type="button"
+                className="btn btn-primary"
+                onClick={() => {
+                  setMensajeExito("");
+                  setModalEditar(true);
+                }}
+              >
+                ✏️ Editar factura
+              </button>
+
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => {
+                  setMensajeExito("");
+                  setModalAnular(true);
+                }}
+              >
+                🚫 Anular factura
+              </button>
+            </>
+          )}
+
           <button
             type="button"
             className="btn"
@@ -2002,17 +2145,34 @@ pdf.text(
               generarPDF
             }
             disabled={
-              generandoPDF
+              generandoPDF ||
+              venta?.anulada === true
             }
           >
-            {generandoPDF
-              ? "Generando PDF..."
-              : "Descargar PDF 🧾"}
+            {venta?.anulada
+              ? "Factura anulada"
+              : generandoPDF
+                ? "Generando PDF..."
+                : "Descargar PDF 🧾"}
           </button>
 
         </div>
 
       </header>
+
+      {mensajeExito && (
+        <div
+          style={{
+            padding: 13,
+            marginBottom: 16,
+            borderRadius: 13,
+            border: "1px solid rgba(34,197,94,.35)",
+            background: "rgba(34,197,94,.07)"
+          }}
+        >
+          ✅ {mensajeExito}
+        </div>
+      )}
 
       {/* FACTURA */}
 
@@ -2044,9 +2204,11 @@ pdf.text(
                   800
               }}
             >
-              {esCredito
-                ? "📅 Crédito"
-                : "💵 Contado"}
+              {venta.anulada
+                ? "🚫 ANULADA"
+                : esCredito
+                  ? "📅 Crédito"
+                  : "💵 Contado"}
             </span>
 
           </div>
@@ -2356,6 +2518,24 @@ pdf.text(
 
             </div>
 
+            {venta.anulada && (
+              <div
+                style={{
+                  marginBottom: 18,
+                  padding: 14,
+                  borderRadius: 14,
+                  border: "1px solid rgba(239,68,68,.30)",
+                  background: "rgba(239,68,68,.06)"
+                }}
+              >
+                <strong style={{ color: "#ef4444" }}>🚫 Factura anulada</strong>
+                <p className="inv-subtle" style={{ margin: "5px 0 0" }}>
+                  {venta.motivoAnulacion || "Sin motivo registrado."}
+                  {venta.anuladaPorEmail ? ` • ${venta.anuladaPorEmail}` : ""}
+                </p>
+              </div>
+            )}
+
             {/* TABLA */}
 
             <div
@@ -2585,6 +2765,38 @@ pdf.text(
         </div>
 
       </section>
+
+      {modalEditar && (
+        <EditarFacturaVentaModal
+          venta={venta}
+          cuenta={cuentaCobrar}
+          ventaId={id}
+          onClose={() => setModalEditar(false)}
+          onSaved={() => {
+            setModalEditar(false);
+            setMensajeExito(
+              "Factura modificada correctamente. Ordexa aplicó las correcciones al inventario, Kardex y cartera."
+            );
+            setRefreshKey(actual => actual + 1);
+          }}
+        />
+      )}
+
+      {modalAnular && (
+        <AnularFacturaVentaModal
+          venta={venta}
+          cuenta={cuentaCobrar}
+          ventaId={id}
+          onClose={() => setModalAnular(false)}
+          onSaved={() => {
+            setModalAnular(false);
+            setMensajeExito(
+              "Factura anulada correctamente. Las unidades fueron devueltas al inventario y quedó registrada la trazabilidad."
+            );
+            setRefreshKey(actual => actual + 1);
+          }}
+        />
+      )}
 
     </div>
   );
