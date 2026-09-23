@@ -1,4 +1,5 @@
 import {
+  useEffect,
   useMemo,
   useState
 } from "react";
@@ -162,6 +163,25 @@ export default function EditarFacturaCompraModal({
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
   const [paso, setPaso] = useState("editar");
+  const [productos, setProductos] = useState([]);
+  const [productoIdNuevo, setProductoIdNuevo] = useState("");
+
+  useEffect(() => {
+    if (!empresa?.id) return;
+
+    getDocs(collection(db, "empresas", empresa.id, "productos"))
+      .then(snap => {
+        setProductos(
+          snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .filter(producto => producto.activo !== false)
+        );
+      })
+      .catch(errorProductos => {
+        console.error(errorProductos);
+        setError("No se pudieron cargar los productos del inventario.");
+      });
+  }, [empresa?.id]);
 
   const [form, setForm] = useState({
     numeroFactura: compra?.numeroFactura || "",
@@ -342,6 +362,29 @@ export default function EditarFacturaCompraModal({
           : item
       )
     );
+  };
+
+  const agregarProducto = () => {
+    const producto = productos.find(item => item.id === productoIdNuevo);
+    if (!producto || items.some(item => item.productoId === producto.id)) return;
+
+    const costo = Number(producto.costoPromedio || producto.costoUnitario || 0);
+    setItems(prev => [
+      ...prev,
+      {
+        ...normalizarItem({
+          productoId: producto.id,
+          codigo: producto.codigo,
+          nombre: producto.nombre,
+          cantidad: 1,
+          costoUnitario: costo,
+          precioVenta: producto.precioUnitario || 0
+        }),
+        cantidad: "1",
+        costoUnitario: String(costo)
+      }
+    ]);
+    setProductoIdNuevo("");
   };
 
   const validar = () => {
@@ -1141,6 +1184,26 @@ export default function EditarFacturaCompraModal({
                 <span className="badge">
                   {items.length} referencia(s)
                 </span>
+              </div>
+
+              <div style={{ display: "flex", gap: 8, marginBottom: 10, alignItems: "end" }}>
+                <div className="form-field" style={{ flex: 1 }}>
+                  <label>Agregar producto</label>
+                  <select value={productoIdNuevo} onChange={e => setProductoIdNuevo(e.target.value)}>
+                    <option value="">Selecciona un producto...</option>
+                    {productos
+                      .filter(producto => !items.some(item => item.productoId === producto.id))
+                      .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""))
+                      .map(producto => (
+                        <option key={producto.id} value={producto.id}>
+                          {producto.nombre}{producto.codigo ? ` (${producto.codigo})` : ""}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={agregarProducto} disabled={!productoIdNuevo}>
+                  + Agregar
+                </button>
               </div>
 
               <div style={{ display: "grid", gap: 9 }}>

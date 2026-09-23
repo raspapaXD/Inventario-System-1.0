@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   collection,
   doc,
@@ -92,6 +92,25 @@ export default function EditarFacturaVentaModal({
   const [error, setError] = useState("");
   const [paso, setPaso] = useState("editar");
   const [motivo, setMotivo] = useState("");
+  const [productos, setProductos] = useState([]);
+  const [productoIdNuevo, setProductoIdNuevo] = useState("");
+
+  useEffect(() => {
+    if (!empresa?.id) return;
+
+    getDocs(collection(db, "empresas", empresa.id, "productos"))
+      .then(snap => {
+        setProductos(
+          snap.docs
+            .map(d => ({ id: d.id, ...d.data() }))
+            .filter(producto => producto.activo !== false)
+        );
+      })
+      .catch(errorProductos => {
+        console.error(errorProductos);
+        setError("No se pudieron cargar los productos del inventario.");
+      });
+  }, [empresa?.id]);
 
   const clienteInicial =
     venta?.cliente && typeof venta.cliente === "object"
@@ -149,26 +168,30 @@ export default function EditarFacturaVentaModal({
 
   const resumen = useMemo(() => {
     const oldMap = new Map(originales.map(item => [item.productoId, item]));
+    const newMap = new Map(items.map(item => [item.productoId, item]));
     const cambios = [];
 
-    for (const item of items) {
-      const anterior = oldMap.get(item.productoId);
-      if (!anterior) continue;
+    for (const productoId of new Set([...oldMap.keys(), ...newMap.keys()])) {
+      const item = newMap.get(productoId);
+      const anterior = oldMap.get(productoId);
+      const producto = item || anterior;
 
-      const qtyNueva = numero(item.cantidad);
-      const precioNuevo = numero(item.precioUnitario);
+      const qtyNueva = numero(item?.cantidad);
+      const precioNuevo = numero(item?.precioUnitario);
+      const qtyAnterior = Number(anterior?.cantidad || 0);
+      const precioAnterior = Number(anterior?.precioUnitario || 0);
 
       if (
-        qtyNueva !== Number(anterior.cantidad || 0) ||
-        precioNuevo !== Number(anterior.precioUnitario || 0)
+        qtyNueva !== qtyAnterior ||
+        precioNuevo !== precioAnterior
       ) {
         cambios.push({
-          productoId: item.productoId,
-          nombre: item.nombre,
-          cantidadAnterior: Number(anterior.cantidad || 0),
+          productoId,
+          nombre: producto.nombre,
+          cantidadAnterior: qtyAnterior,
           cantidadNueva: qtyNueva,
-          ajusteStock: Number(anterior.cantidad || 0) - qtyNueva,
-          precioAnterior: Number(anterior.precioUnitario || 0),
+          ajusteStock: qtyAnterior - qtyNueva,
+          precioAnterior,
           precioNuevo
         });
       }
@@ -203,6 +226,29 @@ export default function EditarFacturaVentaModal({
           : item
       )
     );
+  };
+
+  const agregarProducto = () => {
+    const producto = productos.find(item => item.id === productoIdNuevo);
+    if (!producto || items.some(item => item.productoId === producto.id)) return;
+
+    setItems(prev => [
+      ...prev,
+      normalizarItem({
+        productoId: producto.id,
+        nombre: producto.nombre,
+        codigo: producto.codigo,
+        cantidad: 1,
+        precioUnitario: producto.precioUnitario || producto.precioVenta || 0,
+        precioLista: producto.precioUnitario || producto.precioVenta || 0,
+        costoUnitario: producto.costoPromedio || producto.costoUnitario || 0
+      })
+    ].map(item => ({
+      ...item,
+      cantidad: String(item.cantidad),
+      precioUnitario: String(item.precioUnitario)
+    })));
+    setProductoIdNuevo("");
   };
 
   const validar = () => {
@@ -372,7 +418,10 @@ export default function EditarFacturaVentaModal({
             .map(item => [item.productoId, item])
         );
 
-        const productoIds = Array.from(oldMap.keys());
+        const newMap = new Map(items.map(item => [item.productoId, item]));
+        const productoIds = Array.from(
+          new Set([...oldMap.keys(), ...newMap.keys()])
+        );
         const productosTx = new Map();
 
         for (const productoId of productoIds) {
@@ -393,29 +442,30 @@ export default function EditarFacturaVentaModal({
         const itemsActualizados = [];
         let descuentoTotal = 0;
 
-        for (const item of items) {
-          const anterior = oldMap.get(item.productoId);
-          if (!anterior) continue;
+        for (const productoId of productoIds) {
+          const item = newMap.get(productoId);
+          const anterior = oldMap.get(productoId);
+          const productoActual = item || anterior;
 
-          const qtyAnterior = Number(anterior.cantidad || 0);
-          const qtyNueva = numero(item.cantidad);
-          const precioNuevo = numero(item.precioUnitario);
+          const qtyAnterior = Number(anterior?.cantidad || 0);
+          const qtyNueva = numero(item?.cantidad);
+          const precioNuevo = numero(item?.precioUnitario);
           const ajusteStock = qtyAnterior - qtyNueva;
 
-          const info = productosTx.get(item.productoId);
+          const info = productosTx.get(productoId);
           const producto = info.data;
           const stockAnterior = Number(producto.cantidad || 0);
           const stockNuevo = stockAnterior + ajusteStock;
 
           if (stockNuevo < 0) {
             throw new Error(
-              `${item.nombre}: no hay suficiente stock para aumentar la venta. Disponible actualmente: ${stockAnterior}.`
+              `${productoActual.nombre}: no hay suficiente stock para aumentar la venta. Disponible actualmente: ${stockAnterior}.`
             );
           }
 
           const huboCambio =
             ajusteStock !== 0 ||
-            precioNuevo !== Number(anterior.precioUnitario || 0);
+            precioNuevo !== Number(anterior?.precioUnitario || 0);
 
           if (ajusteStock !== 0) {
             transaction.update(info.ref, {
@@ -435,16 +485,16 @@ export default function EditarFacturaVentaModal({
               motivo: "EDICION_FACTURA_VENTA",
               observacion: motivo.trim(),
               ventaId,
-              productoId: item.productoId,
-              productoNombre: producto.nombre || item.nombre,
-              productoCodigo: producto.codigo || item.codigo || null,
+              productoId,
+              productoNombre: producto.nombre || productoActual.nombre,
+              productoCodigo: producto.codigo || productoActual.codigo || null,
               cantidad: ajusteStock,
               diferencia: ajusteStock,
               stockAnterior,
               stockNuevo,
               cantidadVentaAnterior: qtyAnterior,
               cantidadVentaNueva: qtyNueva,
-              precioVentaAnterior: Number(anterior.precioUnitario || 0),
+              precioVentaAnterior: Number(anterior?.precioUnitario || 0),
               precioVentaNuevo: precioNuevo,
               usuarioId: user.uid,
               usuarioEmail: user.email || null,
@@ -453,13 +503,14 @@ export default function EditarFacturaVentaModal({
           }
 
           if (qtyNueva > 0) {
-            const precioLista = Number(anterior.precioLista || precioNuevo);
+            const precioLista = Number(anterior?.precioLista || precioNuevo);
             const descuentoLinea =
               Math.max(0, precioLista - precioNuevo) * qtyNueva;
             descuentoTotal += descuentoLinea;
 
             itemsActualizados.push({
-              ...anterior,
+              ...productoActual,
+              productoId,
               cantidad: qtyNueva,
               precioUnitario: precioNuevo,
               precioLista,
@@ -628,13 +679,33 @@ export default function EditarFacturaVentaModal({
                 <span className="badge">{items.length} referencia(s)</span>
               </div>
 
+              <div style={{ display: "flex", gap: 8, marginTop: 10, alignItems: "end" }}>
+                <div className="form-field" style={{ flex: 1 }}>
+                  <label>Agregar producto</label>
+                  <select value={productoIdNuevo} onChange={e => setProductoIdNuevo(e.target.value)}>
+                    <option value="">Selecciona un producto...</option>
+                    {productos
+                      .filter(producto => !items.some(item => item.productoId === producto.id))
+                      .sort((a, b) => (a.nombre || "").localeCompare(b.nombre || ""))
+                      .map(producto => (
+                        <option key={producto.id} value={producto.id}>
+                          {producto.nombre}{producto.codigo ? ` (${producto.codigo})` : ""}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+                <button type="button" className="btn btn-primary" onClick={agregarProducto} disabled={!productoIdNuevo}>
+                  + Agregar
+                </button>
+              </div>
+
               <div style={{ display: "grid", gap: 9, marginTop: 10 }}>
                 {items.map(item => (
                   <div
                     key={item.productoId}
                     style={{
                       display: "grid",
-                      gridTemplateColumns: "minmax(180px,1fr) 120px 160px",
+                      gridTemplateColumns: "minmax(180px,1fr) 120px 160px 48px",
                       gap: 9,
                       alignItems: "end",
                       padding: 11,
@@ -664,6 +735,15 @@ export default function EditarFacturaVentaModal({
                       value={item.precioUnitario}
                       onChange={value => actualizarItem(item.productoId, "precioUnitario", value)}
                     />
+
+                    <button
+                      type="button"
+                      className="btn btn-danger"
+                      onClick={() => setItems(prev => prev.filter(x => x.productoId !== item.productoId))}
+                      title="Quitar producto"
+                    >
+                      ✕
+                    </button>
                   </div>
                 ))}
               </div>

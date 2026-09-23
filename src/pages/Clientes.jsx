@@ -8,6 +8,7 @@ import {
 
 import {
   collection,
+  doc,
   documentId,
   endAt,
   getDocs,
@@ -15,7 +16,10 @@ import {
   orderBy,
   query,
   startAfter,
-  startAt
+  startAt,
+  updateDoc,
+  serverTimestamp,
+  where
 } from "firebase/firestore";
 
 import { db } from "../../firebaseClient.js";
@@ -125,6 +129,24 @@ export default function Clientes() {
     error,
     setError
   ] = useState("");
+
+  const [
+    clienteEditando,
+    setClienteEditando
+  ] = useState(null);
+
+  const [
+    formularioEdicion,
+    setFormularioEdicion
+  ] = useState({
+    nombre: "",
+    documento: ""
+  });
+
+  const [
+    guardandoEdicion,
+    setGuardandoEdicion
+  ] = useState(false);
 
   /* =======================================================
      LISTADO PAGINADO
@@ -467,6 +489,82 @@ export default function Clientes() {
       ? resultadosBusqueda
       : clientes;
 
+  const abrirEdicion = cliente => {
+    setClienteEditando(cliente);
+    setFormularioEdicion({
+      nombre: cliente.nombre || "",
+      documento: cliente.documento || ""
+    });
+    setError("");
+  };
+
+  const guardarEdicion = async () => {
+    const nombre = norm(formularioEdicion.nombre);
+    const documento = norm(formularioEdicion.documento);
+
+    if (!nombre) {
+      setError("Ingresa el nombre del cliente.");
+      return;
+    }
+
+    try {
+      setGuardandoEdicion(true);
+      const documentoNormalizado = normalizarDocumento(documento);
+
+      if (documentoNormalizado) {
+        const consultas = await Promise.allSettled([
+          getDocs(
+            query(
+              clientesCol,
+              where("documentoNormalizado", "==", documentoNormalizado),
+              limit(5)
+            )
+          ),
+          getDocs(
+            query(
+              clientesCol,
+              where("documento", "==", documento),
+              limit(5)
+            )
+          )
+        ]);
+
+        const duplicado = consultas
+          .filter(resultado => resultado.status === "fulfilled")
+          .flatMap(resultado => resultado.value.docs)
+          .find(cliente => cliente.id !== clienteEditando.id);
+
+        if (duplicado) {
+          setError("Ya existe otro cliente con ese documento.");
+          return;
+        }
+      }
+
+      const referencia = doc(clientesCol, clienteEditando.id);
+      const cambios = {
+        nombre,
+        nombreLower: slug(nombre),
+        nombreBusqueda: normalizarNombreBusqueda(nombre),
+        documento: documento || null,
+        documentoNormalizado: normalizarDocumento(documento) || null,
+        updatedAt: serverTimestamp()
+      };
+
+      await updateDoc(referencia, cambios);
+      const actualizado = { ...clienteEditando, ...cambios, updatedAt: new Date() };
+      const reemplazar = lista =>
+        lista.map(cliente => cliente.id === actualizado.id ? actualizado : cliente);
+      setClientes(reemplazar);
+      setResultadosBusqueda(reemplazar);
+      setClienteEditando(null);
+    } catch (e) {
+      console.error(e);
+      setError("No se pudo actualizar el cliente.");
+    } finally {
+      setGuardandoEdicion(false);
+    }
+  };
+
   /* =======================================================
      EMPRESA
   ======================================================= */
@@ -709,6 +807,14 @@ export default function Clientes() {
                           Ver historial
                         </Link>
 
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => abrirEdicion(c)}
+                        >
+                          ✏️ Editar
+                        </button>
+
                       </div>
 
                     </li>
@@ -752,6 +858,41 @@ export default function Clientes() {
 
       </section>
 
+      {clienteEditando && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card" style={{ maxWidth: 520 }}>
+            <h3>Editar cliente</h3>
+            <div className="form-grid">
+              <CampoEdicion
+                label="Nombre *"
+                value={formularioEdicion.nombre}
+                onChange={value => setFormularioEdicion(prev => ({ ...prev, nombre: value }))}
+              />
+              <CampoEdicion
+                label="Documento"
+                value={formularioEdicion.documento}
+                onChange={value => setFormularioEdicion(prev => ({ ...prev, documento: value }))}
+              />
+            </div>
+            <div className="modal-actions" style={{ marginTop: 18 }}>
+              <button type="button" className="btn" onClick={() => setClienteEditando(null)} disabled={guardandoEdicion}>Cancelar</button>
+              <button type="button" className="btn btn-primary" onClick={guardarEdicion} disabled={guardandoEdicion}>
+                {guardandoEdicion ? "Guardando..." : "Guardar cambios"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+function CampoEdicion({ label, value, onChange }) {
+  return (
+    <div className="form-field">
+      <label>{label}</label>
+      <input value={value} onChange={e => onChange(e.target.value)} />
     </div>
   );
 }

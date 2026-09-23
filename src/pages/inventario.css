@@ -895,6 +895,12 @@ body{
   background: rgba(6,6,6,.6);
 }
 
+@media (min-width: 901px){
+  .ordexa-app-shell[data-sidebar-visible="true"] .modal-overlay{
+    left: var(--ordexa-sidebar-width);
+  }
+}
+
 .modal-card{
   width: 100%;
   max-width: 520px;

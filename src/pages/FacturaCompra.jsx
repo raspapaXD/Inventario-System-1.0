@@ -22,6 +22,7 @@ import {
 } from "firebase/firestore";
 
 import { db } from "../../firebaseClient.js";
+import jsPDF from "jspdf";
 import { useTenant } from "../tenant/TenantProvider";
 import AppMenu from "../components/AppMenu.jsx";
 import EditarFacturaCompraModal from "../components/EditarFacturaCompraModal.jsx";
@@ -207,6 +208,11 @@ export default function FacturaCompra() {
     refreshKey,
     setRefreshKey
   ] = useState(0);
+
+  const [
+    generandoPDF,
+    setGenerandoPDF
+  ] = useState(false);
 
   const puedeEditar =
     useMemo(() => {
@@ -579,6 +585,235 @@ export default function FacturaCompra() {
               "PENDIENTE"
             );
 
+  const generarPDF = async () => {
+    if (generandoPDF || !compra) return;
+
+    try {
+      setGenerandoPDF(true);
+
+      const pdf = new jsPDF({
+        orientation: "portrait",
+        unit: "mm",
+        format: "a4"
+      });
+
+      const pageWidth = pdf.internal.pageSize.getWidth();
+      const pageHeight = pdf.internal.pageSize.getHeight();
+      const margin = 16;
+      const contentWidth = pageWidth - margin * 2;
+      const dark = [31, 41, 55];
+      const gray = [100, 116, 139];
+      const border = [226, 232, 240];
+      const light = [248, 250, 252];
+      const green = [22, 163, 74];
+      const amber = [217, 119, 6];
+      const fechaPDF = formatearFecha(compra.fechaFactura || compra.fecha);
+      const folio = compra.numeroFactura || id;
+
+      const nuevaPagina = () => {
+        pdf.addPage();
+        pdf.setFillColor(255, 255, 255);
+        pdf.rect(0, 0, pageWidth, pageHeight, "F");
+        return 18;
+      };
+
+      pdf.setFillColor(255, 255, 255);
+      pdf.rect(0, 0, pageWidth, pageHeight, "F");
+
+      const logoData = await cargarImagenComoDataURL(empresaInfo?.logoUrl);
+      let empresaX = margin;
+
+      if (logoData) {
+        try {
+          pdf.addImage(
+            logoData,
+            logoData.includes("image/png") ? "PNG" : "JPEG",
+            margin,
+            14,
+            18,
+            18
+          );
+          empresaX = margin + 24;
+        } catch (e) {
+          console.warn("No se pudo insertar el logo en el PDF.", e);
+        }
+      }
+
+      pdf.setTextColor(...dark);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(17);
+      pdf.text(empresaInfo?.nombre || "Mi Empresa", empresaX, 21);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9.5);
+      pdf.setTextColor(...gray);
+      if (empresaInfo?.nit) pdf.text(`NIT: ${empresaInfo.nit}`, empresaX, 27);
+
+      pdf.setTextColor(...dark);
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(20);
+      pdf.text("FACTURA DE COMPRA", pageWidth - margin, 19, { align: "right" });
+      pdf.setFontSize(11);
+      pdf.text(`#${folio}`, pageWidth - margin, 25, { align: "right" });
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(...gray);
+      pdf.text(fechaPDF, pageWidth - margin, 30, { align: "right" });
+
+      pdf.setDrawColor(...border);
+      pdf.setLineWidth(0.4);
+      pdf.line(margin, 39, pageWidth - margin, 39);
+
+      const infoY = 48;
+      const colWidth = contentWidth / 2;
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.setTextColor(...gray);
+      pdf.text("PROVEEDOR", margin, infoY);
+      pdf.setFontSize(11);
+      pdf.setTextColor(...dark);
+      pdf.text(compra.proveedorNombre || "Proveedor no registrado", margin, infoY + 6);
+      if (compra.proveedorDocumento) {
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(9);
+        pdf.setTextColor(...gray);
+        pdf.text(`Documento: ${compra.proveedorDocumento}`, margin, infoY + 12);
+      }
+
+      const pagoX = margin + colWidth;
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.setTextColor(...gray);
+      pdf.text("FORMA DE PAGO", pagoX, infoY);
+      pdf.setFontSize(11);
+      pdf.setTextColor(...(esCredito ? amber : green));
+      pdf.text(esCredito ? "CRÉDITO" : "CONTADO", pagoX, infoY + 6);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+      pdf.setTextColor(...gray);
+      pdf.text(
+        esCredito ? `Vencimiento: ${fechaVencimiento}` : "Compra pagada",
+        pagoX,
+        infoY + 12
+      );
+
+      let y = 69;
+      const estadoHeight = esCredito ? 28 : 22;
+      pdf.setFillColor(...light);
+      pdf.setDrawColor(...border);
+      pdf.roundedRect(margin, y, contentWidth, estadoHeight, 2, 2, "FD");
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(8);
+      pdf.setTextColor(...gray);
+      pdf.text("ESTADO DE PAGO", margin + 5, y + 7);
+      pdf.setFontSize(11);
+      pdf.setTextColor(...(estadoPago === "PAGADA" ? green : amber));
+      pdf.text(estadoPago, margin + 5, y + 14);
+      pdf.setTextColor(...gray);
+      pdf.setFontSize(8);
+      pdf.text("TOTAL", pageWidth - margin - 5, y + 7, { align: "right" });
+      pdf.setTextColor(...dark);
+      pdf.setFontSize(15);
+      pdf.text(moneda(total), pageWidth - margin - 5, y + 15, { align: "right" });
+
+      if (esCredito) {
+        const terceraParte = contentWidth / 3;
+        pdf.setDrawColor(...border);
+        pdf.line(margin + 5, y + 18, pageWidth - margin - 5, y + 18);
+        pdf.setFont("helvetica", "normal");
+        pdf.setFontSize(7.5);
+        pdf.setTextColor(...gray);
+        pdf.text("Total factura", margin + 5, y + 23);
+        pdf.text("Abonado", margin + terceraParte + 5, y + 23);
+        pdf.text("Saldo pendiente", margin + terceraParte * 2 + 5, y + 23);
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(9.5);
+        pdf.setTextColor(...dark);
+        pdf.text(moneda(total), margin + 5, y + 27);
+        pdf.text(moneda(pagado), margin + terceraParte + 5, y + 27);
+        pdf.setTextColor(...(saldoPendiente > 0 ? amber : green));
+        pdf.text(moneda(saldoPendiente), margin + terceraParte * 2 + 5, y + 27);
+      }
+
+      y += estadoHeight + 10;
+      const colProducto = margin;
+      const colCantidad = 118;
+      const colPrecio = 147;
+      const colSubtotal = pageWidth - margin;
+      const dibujarEncabezado = () => {
+        pdf.setFillColor(241, 245, 249);
+        pdf.setDrawColor(...border);
+        pdf.rect(margin, y, contentWidth, 10, "FD");
+        pdf.setFont("helvetica", "bold");
+        pdf.setFontSize(8.5);
+        pdf.setTextColor(...dark);
+        pdf.text("Producto", colProducto + 4, y + 6.5);
+        pdf.text("Cant.", colCantidad, y + 6.5, { align: "right" });
+        pdf.text("Costo unit.", colPrecio, y + 6.5, { align: "right" });
+        pdf.text("Subtotal", colSubtotal - 4, y + 6.5, { align: "right" });
+        y += 10;
+      };
+
+      dibujarEncabezado();
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(9);
+
+      for (const item of items) {
+        const subtotal = item.subtotal || item.cantidad * item.costoUnitario;
+        const nombreLineas = pdf.splitTextToSize(item.nombre, 78);
+        const rowHeight = Math.max(10, nombreLineas.length * 4.5 + 4);
+
+        if (y + rowHeight > pageHeight - 38) {
+          y = nuevaPagina();
+          dibujarEncabezado();
+        }
+
+        pdf.setDrawColor(...border);
+        pdf.setTextColor(...dark);
+        pdf.rect(margin, y, contentWidth, rowHeight);
+        pdf.text(nombreLineas, colProducto + 4, y + 6);
+        pdf.text(String(item.cantidad), colCantidad, y + 6, { align: "right" });
+        pdf.text(moneda(item.costoUnitario), colPrecio, y + 6, { align: "right" });
+        pdf.text(moneda(subtotal), colSubtotal - 4, y + 6, { align: "right" });
+        y += rowHeight;
+      }
+
+      if (y > pageHeight - 52) y = nuevaPagina();
+      y += 4;
+      pdf.setDrawColor(...border);
+      pdf.line(118, y, pageWidth - margin, y);
+      y += 8;
+      pdf.setFont("helvetica", "bold");
+      pdf.setFontSize(10);
+      pdf.setTextColor(...gray);
+      pdf.text("TOTAL", 147, y, { align: "right" });
+      pdf.setFontSize(14);
+      pdf.setTextColor(...dark);
+      pdf.text(moneda(total), pageWidth - margin, y, { align: "right" });
+
+      const footerY = Math.max(y + 18, pageHeight - 25);
+      pdf.setDrawColor(...border);
+      pdf.line(margin, footerY, pageWidth - margin, footerY);
+      pdf.setFont("helvetica", "normal");
+      pdf.setFontSize(8);
+      pdf.setTextColor(...gray);
+      pdf.text(
+        esCredito
+          ? "Documento generado por Ordexa · Conserva esta factura como soporte de la operación."
+          : "Registro de compra · Documento generado por Ordexa.",
+        pageWidth / 2,
+        footerY + 6,
+        { align: "center" }
+      );
+
+      pdf.save(`Factura-Compra-${folio}.pdf`);
+    } catch (e) {
+      console.error(e);
+      alert("No fue posible generar el PDF.");
+    } finally {
+      setGenerandoPDF(false);
+    }
+  };
+
   const fechaVencimiento =
     formatearFecha(
       cuenta?.fechaVencimiento ??
@@ -820,6 +1055,19 @@ export default function FacturaCompra() {
           </button>
 
           <AppMenu />
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={generarPDF}
+            disabled={generandoPDF || compra.anulada === true}
+          >
+            {compra.anulada
+              ? "Factura anulada"
+              : generandoPDF
+                ? "Generando PDF..."
+                : "Descargar PDF 🧾"}
+          </button>
 
         </div>
 
@@ -1589,4 +1837,24 @@ function MiniDato({
 
     </div>
   );
+}
+
+async function cargarImagenComoDataURL(url) {
+  if (!url) return null;
+
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return null;
+    const blob = await response.blob();
+
+    return await new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onloadend = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(blob);
+    });
+  } catch (e) {
+    console.warn("No fue posible cargar el logo para el PDF.", e);
+    return null;
+  }
 }

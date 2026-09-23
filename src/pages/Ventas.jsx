@@ -20,6 +20,7 @@ import {
 import { useNavigate, Link } from "react-router-dom";
 import { useTenant } from "../tenant/TenantProvider";
 import AppMenu from "../components/AppMenu.jsx";
+import ImportarComprobanteModal from "../components/ImportarComprobanteModal.jsx";
 
 import "./inventario.css";
 
@@ -79,6 +80,25 @@ const normalizarDocumento = value =>
   String(value || "")
     .replace(/[^0-9a-zA-Z]/g, "")
     .toLowerCase();
+
+const fechaConMeses = meses => {
+  const fecha = new Date();
+  const dia = fecha.getDate();
+  fecha.setDate(1);
+  fecha.setMonth(fecha.getMonth() + Number(meses));
+  const ultimoDia = new Date(
+    fecha.getFullYear(),
+    fecha.getMonth() + 1,
+    0
+  ).getDate();
+  fecha.setDate(Math.min(dia, ultimoDia));
+
+  return [
+    fecha.getFullYear(),
+    String(fecha.getMonth() + 1).padStart(2, "0"),
+    String(fecha.getDate()).padStart(2, "0")
+  ].join("-");
+};
 
 const esBusquedaDocumento = value =>
   /[0-9]/.test(
@@ -326,6 +346,11 @@ export default function Ventas() {
   ] = useState("");
 
   const [
+    modalImportar,
+    setModalImportar
+  ] = useState(false);
+
+  const [
     recientes,
     setRecientes
   ] = useState([]);
@@ -343,6 +368,11 @@ export default function Ventas() {
     fechaVencimiento,
     setFechaVencimiento
   ] = useState("");
+
+  const [
+    plazoCredito,
+    setPlazoCredito
+  ] = useState("1");
 
   /* =======================================================
      BORRADOR DE VENTA
@@ -446,6 +476,11 @@ export default function Ventas() {
       setFechaVencimiento(
         borrador?.fechaVencimiento ||
         ""
+      );
+
+      setPlazoCredito(
+        borrador?.plazoCredito ||
+        "1"
       );
 
       setCantidad(
@@ -563,6 +598,8 @@ export default function Ventas() {
 
       fechaVencimiento,
 
+      plazoCredito,
+
       productoSeleccionadoId:
         productoSeleccionado?.id ||
         null,
@@ -596,6 +633,7 @@ export default function Ventas() {
     items,
     tipoPago,
     fechaVencimiento,
+    plazoCredito,
     productoSeleccionado?.id,
     cantidad,
     precioVenta,
@@ -1745,8 +1783,19 @@ export default function Ventas() {
         setFechaVencimiento(
           ""
         );
+      } else if (!fechaVencimiento) {
+        setPlazoCredito("1");
+        setFechaVencimiento(fechaConMeses(1));
       }
     };
+
+  const seleccionarPlazoCredito = plazo => {
+    setPlazoCredito(plazo);
+
+    if (plazo !== "PERSONALIZADA") {
+      setFechaVencimiento(fechaConMeses(plazo));
+    }
+  };
 
   /* =======================================================
      REGISTRAR VENTA
@@ -2646,6 +2695,14 @@ export default function Ventas() {
             ← Inventario
           </Link>
 
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setModalImportar(true)}
+          >
+            📄 Importar venta
+          </button>
+
           <AppMenu />
 
         </div>
@@ -3313,21 +3370,30 @@ export default function Ventas() {
                 {tipoPago === "CREDITO" ? (
 
                   <div className="form-field">
-                    <label>
-                      Vencimiento *
-                    </label>
+                    <label>Plazo de crédito *</label>
+
+                    <select
+                      value={plazoCredito}
+                      onChange={e => seleccionarPlazoCredito(e.target.value)}
+                    >
+                      <option value="1">Vence en 1 mes</option>
+                      <option value="2">Vence en 2 meses</option>
+                      <option value="PERSONALIZADA">Elegir fecha</option>
+                    </select>
 
                     <input
                       type="date"
-                      value={
-                        fechaVencimiento
-                      }
-                      onChange={e =>
-                        setFechaVencimiento(
-                          e.target.value
-                        )
-                      }
+                      value={fechaVencimiento}
+                      onChange={e => {
+                        setPlazoCredito("PERSONALIZADA");
+                        setFechaVencimiento(e.target.value);
+                      }}
+                      style={{ marginTop: 7 }}
                     />
+
+                    <span className="inv-subtle" style={{ display: "block", marginTop: 4, fontSize: 10 }}>
+                      Fecha exacta: {fechaVencimiento || "pendiente"}
+                    </span>
                   </div>
 
                 ) : (
@@ -4545,6 +4611,42 @@ export default function Ventas() {
 
         </div>
 
+      )}
+
+      {modalImportar && (
+        <ImportarComprobanteModal
+          tipo="venta"
+          productos={productos}
+          onClose={() => setModalImportar(false)}
+          onApply={datos => {
+            setCliente({
+              id: null,
+              nombre: datos.nombre || "",
+              documento: datos.documento || "",
+              existente: false
+            });
+            setModoClienteNuevo(true);
+            setBusquedaCliente("");
+            setResultadosClientes([]);
+            setItems(
+              datos.items.map(item => {
+                const producto = productos.find(p => p.id === item.productoId);
+                const precio = Number(producto?.precioUnitario || 0);
+                return {
+                  productoId: item.productoId,
+                  nombre: producto?.nombre || item.nombre,
+                  codigo: producto?.codigo || null,
+                  cantidad: Number(item.cantidad || 0),
+                  precioUnitario: precio,
+                  precioLista: Number(producto?.precioUnitario || precio),
+                  costoUnitario: Number(producto?.costoPromedio || producto?.costoUnitario || 0),
+                  descuento: Math.max(0, Number(producto?.precioUnitario || precio) - precio) * Number(item.cantidad || 0),
+                  subtotal: precio * Number(item.cantidad || 0)
+                };
+              })
+            );
+          }}
+        />
       )}
 
     </div>

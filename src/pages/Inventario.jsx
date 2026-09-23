@@ -13,9 +13,12 @@ import {
   doc,
   getDoc,
   getDocs,
+  limit,
+  query,
   runTransaction,
   serverTimestamp,
-  updateDoc
+  updateDoc,
+  where
 } from "firebase/firestore";
 
 import { Link } from "react-router-dom";
@@ -117,12 +120,12 @@ const normalizarCodigo = value =>
     .replace(/[^A-Z0-9_-]/g, "");
 
 const formatearCodigoAutomatico = numero =>
-  `PROD-${String(numero).padStart(6, "0")}`;
+  String(numero).padStart(6, "0");
 
 const numeroCodigoAutomatico = codigo => {
   const match = String(codigo || "")
     .toUpperCase()
-    .match(/^PROD-(\d+)$/);
+    .match(/^(?:PROD-)?(\d+)$/);
 
   return match
     ? Number(match[1])
@@ -1333,7 +1336,7 @@ function Inventario() {
     };
 
   const abrirNuevoProducto =
-    () => {
+    async () => {
       if (!puedeGestionar) {
         return;
       }
@@ -1342,6 +1345,19 @@ function Inventario() {
       setExito("");
 
       resetProductoForm();
+
+      try {
+        const codigoAutomatico =
+          await reservarCodigoAutomatico();
+
+        setProductoForm(prev => ({
+          ...prev,
+          codigo: codigoAutomatico
+        }));
+      } catch (e) {
+        console.error(e);
+        setError("No se pudo generar un código automático.");
+      }
 
       setModalProducto(
         true
@@ -1774,9 +1790,7 @@ function Inventario() {
             serverTimestamp()
         };
 
-        if (
-          editandoId
-        ) {
+        if (editandoId) {
           /*
            * MUY IMPORTANTE:
            *
@@ -1788,16 +1802,44 @@ function Inventario() {
            * costo promedio real del producto.
            */
 
-          await updateDoc(
-            doc(
-              db,
-              "empresas",
-              empresa.id,
-              "productos",
-              editandoId
-            ),
-            datosBase
+          const productoRef = doc(
+            db,
+            "empresas",
+            empresa.id,
+            "productos",
+            editandoId
           );
+
+          await runTransaction(db, async transaction => {
+            const productoSnap = await transaction.get(productoRef);
+            if (!productoSnap.exists()) {
+              throw new Error("El producto ya no existe.");
+            }
+
+            const duplicadosNormalizados = await transaction.get(
+              query(
+                productosCol,
+                where("codigoNormalizado", "==", datosBase.codigoNormalizado),
+                limit(5)
+              )
+            );
+            const duplicadosAntiguos = await transaction.get(
+              query(
+                productosCol,
+                where("codigo", "==", codigoFinal),
+                limit(5)
+              )
+            );
+
+            if (
+              [...duplicadosNormalizados.docs, ...duplicadosAntiguos.docs]
+                .some(snap => snap.id !== editandoId)
+            ) {
+              throw new Error(`El código ${codigoFinal} ya pertenece a otro producto.`);
+            }
+
+            transaction.update(productoRef, datosBase);
+          });
 
           setExito(
             "Producto actualizado correctamente."
@@ -1809,25 +1851,36 @@ function Inventario() {
            * La existencia entra por compra o ajuste.
            */
 
-          await addDoc(
-            productosCol,
-            {
-              ...datosBase,
+          const productoRef = doc(productosCol);
 
-              cantidad: 0,
+          await runTransaction(db, async transaction => {
+            const duplicadosNormalizados = await transaction.get(
+              query(
+                productosCol,
+                where("codigoNormalizado", "==", datosBase.codigoNormalizado),
+                limit(5)
+              )
+            );
+            const duplicadosAntiguos = await transaction.get(
+              query(
+                productosCol,
+                where("codigo", "==", codigoFinal),
+                limit(5)
+              )
+            );
 
-              costoUnitario:
-                costo,
-
-              costoPromedio:
-                costo,
-
-              /*
-               * Todo producto nuevo nace activo.
-               */
-              activo: true
+            if (!duplicadosNormalizados.empty || !duplicadosAntiguos.empty) {
+              throw new Error(`El código ${codigoFinal} ya pertenece a otro producto.`);
             }
-          );
+
+            transaction.set(productoRef, {
+              ...datosBase,
+              cantidad: 0,
+              costoUnitario: costo,
+              costoPromedio: costo,
+              activo: true
+            });
+          });
 
           setExito(
             "Producto creado correctamente. Su stock inicial es 0."
@@ -3288,7 +3341,7 @@ function Inventario() {
                     fontSize: 11
                   }}
                 >
-                  Déjalo vacío y Ordexa generará uno automáticamente.
+                  Ordexa genera un código disponible. Puedes editarlo, pero no se permiten duplicados.
                 </span>
 
               </div>

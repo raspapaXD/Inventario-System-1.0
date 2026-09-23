@@ -8,6 +8,7 @@ import {
 
 import {
   collection,
+  doc,
   documentId,
   endAt,
   getDocs,
@@ -15,7 +16,9 @@ import {
   orderBy,
   query,
   startAfter,
-  startAt
+  startAt,
+  updateDoc,
+  serverTimestamp
 } from "firebase/firestore";
 
 import {
@@ -123,6 +126,24 @@ export default function Proveedores() {
     error,
     setError
   ] = useState("");
+
+  const [
+    proveedorEditando,
+    setProveedorEditando
+  ] = useState(null);
+
+  const [
+    formularioEdicion,
+    setFormularioEdicion
+  ] = useState({
+    nombre: "",
+    documento: ""
+  });
+
+  const [
+    guardandoEdicion,
+    setGuardandoEdicion
+  ] = useState(false);
 
   const normalizarSnap =
     snapDoc => ({
@@ -491,6 +512,51 @@ export default function Proveedores() {
       ? resultadosBusqueda
       : proveedores;
 
+  const abrirEdicion = proveedor => {
+    setProveedorEditando(proveedor);
+    setFormularioEdicion({
+      nombre: proveedor.nombre || "",
+      documento: proveedor.documento || ""
+    });
+    setError("");
+  };
+
+  const guardarEdicion = async () => {
+    const nombre = String(formularioEdicion.nombre || "").trim();
+    const documento = String(formularioEdicion.documento || "").trim();
+
+    if (!nombre) {
+      setError("Ingresa el nombre del proveedor.");
+      return;
+    }
+
+    try {
+      setGuardandoEdicion(true);
+      const referencia = doc(proveedoresCol, proveedorEditando.id);
+      const cambios = {
+        nombre,
+        nombreLower: nombre.toLowerCase(),
+        nombreBusqueda: normalizarNombreBusqueda(nombre),
+        documento: documento || null,
+        documentoNormalizado: normalizarDocumento(documento) || null,
+        updatedAt: serverTimestamp()
+      };
+
+      await updateDoc(referencia, cambios);
+      const actualizado = { ...proveedorEditando, ...cambios, updatedAt: new Date() };
+      const reemplazar = lista =>
+        lista.map(proveedor => proveedor.id === actualizado.id ? actualizado : proveedor);
+      setProveedores(reemplazar);
+      setResultadosBusqueda(reemplazar);
+      setProveedorEditando(null);
+    } catch (e) {
+      console.error(e);
+      setError("No se pudo actualizar el proveedor.");
+    } finally {
+      setGuardandoEdicion(false);
+    }
+  };
+
   /* =======================================================
      EMPRESA
   ======================================================= */
@@ -755,6 +821,14 @@ export default function Proveedores() {
                           📑 Ver compras
                         </Link>
 
+                        <button
+                          type="button"
+                          className="btn btn-small"
+                          onClick={() => abrirEdicion(proveedor)}
+                        >
+                          ✏️ Editar
+                        </button>
+
                       </div>
 
                     </li>
@@ -798,6 +872,41 @@ export default function Proveedores() {
 
       </section>
 
+      {proveedorEditando && (
+        <div className="modal-overlay" role="dialog" aria-modal="true">
+          <div className="modal-card" style={{ maxWidth: 520 }}>
+            <h3>Editar proveedor</h3>
+            <div className="form-grid">
+              <CampoEdicion
+                label="Nombre *"
+                value={formularioEdicion.nombre}
+                onChange={value => setFormularioEdicion(prev => ({ ...prev, nombre: value }))}
+              />
+              <CampoEdicion
+                label="NIT / Documento"
+                value={formularioEdicion.documento}
+                onChange={value => setFormularioEdicion(prev => ({ ...prev, documento: value }))}
+              />
+            </div>
+            <div className="modal-actions" style={{ marginTop: 18 }}>
+              <button type="button" className="btn" onClick={() => setProveedorEditando(null)} disabled={guardandoEdicion}>Cancelar</button>
+              <button type="button" className="btn btn-primary" onClick={guardarEdicion} disabled={guardandoEdicion}>
+                {guardandoEdicion ? "Guardando..." : "Guardar cambios"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+function CampoEdicion({ label, value, onChange }) {
+  return (
+    <div className="form-field">
+      <label>{label}</label>
+      <input value={value} onChange={e => onChange(e.target.value)} />
     </div>
   );
 }

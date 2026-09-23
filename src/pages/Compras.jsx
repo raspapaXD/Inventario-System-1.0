@@ -20,6 +20,7 @@ import { db } from "../../firebaseClient.js";
 import { Link } from "react-router-dom";
 import { useTenant } from "../tenant/TenantProvider";
 import AppMenu from "../components/AppMenu.jsx";
+import ImportarComprobanteModal from "../components/ImportarComprobanteModal.jsx";
 
 import "./inventario.css";
 
@@ -732,6 +733,7 @@ export default function Compras() {
   const [guardando, setGuardando] = useState(false);
   const [error, setError] = useState("");
   const [exito, setExito] = useState("");
+  const [modalImportar, setModalImportar] = useState(false);
 
   /* =======================================================
      BORRADOR DE COMPRA
@@ -1204,30 +1206,6 @@ export default function Compras() {
   }, [productoActual]);
 
   /* =======================================================
-     PRECIO SUGERIDO
-  ======================================================= */
-
-  useEffect(() => {
-    if (!productoActual) return;
-    if (simulacion.precioSugerido <= 0) return;
-
-    setLinea(prev => ({
-      ...prev,
-      precioVenta:
-        formatearNumeroInput(
-          Math.round(
-            simulacion.precioSugerido
-          )
-        )
-    }));
-  }, [
-    productoActual?.id,
-    linea.costoCompra,
-    linea.cantidad,
-    linea.gananciaObjetivo
-  ]);
-
-  /* =======================================================
      SELECCIONAR PRODUCTO
   ======================================================= */
 
@@ -1260,7 +1238,11 @@ export default function Compras() {
       gananciaMinima:
         p?.porcentajeGananciaMinima ??
         10,
-      precioVenta: ""
+      precioVenta:
+        formatearNumeroInput(
+          p?.precioUnitario ??
+          0
+        )
     });
 
     setError("");
@@ -1720,9 +1702,16 @@ export default function Compras() {
                 precioMinimoManual:
                   usaPrecioMinimoManual,
 
+                /*
+                 * El precio de venta lo define el usuario al crear
+                 * o editar el producto. La compra solo recalcula la
+                 * sugerencia según el costo y el margen configurado.
+                 */
                 precioUnitario:
-                  Math.round(
-                    item.precioVenta
+                  Number(
+                    producto.precioUnitario ??
+                    item.precioVenta ??
+                    0
                   ),
                 actualizadoEn:
                   serverTimestamp()
@@ -2092,6 +2081,14 @@ export default function Compras() {
           >
             ← Inventario
           </Link>
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setModalImportar(true)}
+          >
+            📄 Importar compra
+          </button>
 
           <AppMenu />
         </div>
@@ -3429,7 +3426,7 @@ export default function Compras() {
                       }}
                     >
                       <label>
-                        Precio de venta *
+                        Precio de venta registrado
                       </label>
 
                       <input
@@ -3447,6 +3444,7 @@ export default function Compras() {
                               )
                           })
                         }
+                        readOnly
                         placeholder="0"
                         style={{
                           fontWeight: 800,
@@ -3965,6 +3963,40 @@ export default function Compras() {
           </button>
         </div>
       </div>
+
+      {modalImportar && (
+        <ImportarComprobanteModal
+          tipo="compra"
+          productos={productos}
+          onClose={() => setModalImportar(false)}
+          onApply={datos => {
+            setFactura(prev => ({
+              ...prev,
+              numeroFactura: datos.numeroFactura || prev.numeroFactura,
+              fecha: datos.fecha || prev.fecha,
+              proveedorNombre: datos.nombre || prev.proveedorNombre,
+              proveedorDocumento: datos.documento || prev.proveedorDocumento
+            }));
+            setItems(
+              datos.items.map(item => {
+                const producto = productos.find(p => p.id === item.productoId);
+                const costoCompra = Number(item.precio || 0);
+                return {
+                  productoId: item.productoId,
+                  codigo: producto?.codigo || null,
+                  nombre: producto?.nombre || item.nombre,
+                  cantidad: Number(item.cantidad || 0),
+                  costoCompra,
+                  subtotal: costoCompra * Number(item.cantidad || 0),
+                  gananciaObjetivo: Number(producto?.porcentajeGanancia ?? 30),
+                  gananciaMinima: Number(producto?.porcentajeGananciaMinima ?? 10),
+                  precioVenta: Number(producto?.precioUnitario || 0)
+                };
+              })
+            );
+          }}
+        />
+      )}
     </div>
   );
 }

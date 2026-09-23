@@ -169,7 +169,10 @@ export default function AppLayout({
       : !sidebarOcultaDesktop;
 
   return (
-    <div className="ordexa-app-shell">
+    <div
+      className="ordexa-app-shell"
+      data-sidebar-visible={sidebarVisible ? "true" : "false"}
+    >
 
       <AppSidebar
         visible={
