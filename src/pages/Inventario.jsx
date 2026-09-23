@@ -1685,6 +1685,32 @@ function Inventario() {
             await reservarCodigoAutomatico();
         }
 
+        const codigoNormalizadoFinal = normalizarCodigo(codigoFinal);
+        const consultasCodigo = await Promise.all([
+          getDocs(
+            query(
+              productosCol,
+              where("codigoNormalizado", "==", codigoNormalizadoFinal),
+              limit(5)
+            )
+          ),
+          getDocs(
+            query(
+              productosCol,
+              where("codigo", "==", codigoFinal),
+              limit(5)
+            )
+          )
+        ]);
+
+        const codigoDuplicadoEnFirestore = consultasCodigo
+          .flatMap(resultado => resultado.docs)
+          .some(snap => snap.id !== editandoId);
+
+        if (codigoDuplicadoEnFirestore) {
+          throw new Error(`El código ${codigoFinal} ya pertenece a otro producto.`);
+        }
+
         let urlImagen =
           typeof productoForm.imagen ===
           "string"
@@ -1816,28 +1842,6 @@ function Inventario() {
               throw new Error("El producto ya no existe.");
             }
 
-            const duplicadosNormalizados = await transaction.get(
-              query(
-                productosCol,
-                where("codigoNormalizado", "==", datosBase.codigoNormalizado),
-                limit(5)
-              )
-            );
-            const duplicadosAntiguos = await transaction.get(
-              query(
-                productosCol,
-                where("codigo", "==", codigoFinal),
-                limit(5)
-              )
-            );
-
-            if (
-              [...duplicadosNormalizados.docs, ...duplicadosAntiguos.docs]
-                .some(snap => snap.id !== editandoId)
-            ) {
-              throw new Error(`El código ${codigoFinal} ya pertenece a otro producto.`);
-            }
-
             transaction.update(productoRef, datosBase);
           });
 
@@ -1854,25 +1858,6 @@ function Inventario() {
           const productoRef = doc(productosCol);
 
           await runTransaction(db, async transaction => {
-            const duplicadosNormalizados = await transaction.get(
-              query(
-                productosCol,
-                where("codigoNormalizado", "==", datosBase.codigoNormalizado),
-                limit(5)
-              )
-            );
-            const duplicadosAntiguos = await transaction.get(
-              query(
-                productosCol,
-                where("codigo", "==", codigoFinal),
-                limit(5)
-              )
-            );
-
-            if (!duplicadosNormalizados.empty || !duplicadosAntiguos.empty) {
-              throw new Error(`El código ${codigoFinal} ya pertenece a otro producto.`);
-            }
-
             transaction.set(productoRef, {
               ...datosBase,
               cantidad: 0,
